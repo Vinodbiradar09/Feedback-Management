@@ -5,7 +5,8 @@ import { User } from "../models/users.model.js";
 import { uploadOnCloudinary } from "../utils/cloudinary.js";
 import dayjs from "dayjs";
 import { validateEmail, validatePassword } from "../utils/validators.js";
-import {options} from "../utils/cookies.js";
+import { options } from "../utils/cookies.js";
+import jwt from "jsonwebtoken";
 
 const generateAccessAndRefreshTokens = async (userId) => {
     try {
@@ -29,7 +30,7 @@ const generateAccessAndRefreshTokens = async (userId) => {
         return { accessToken, refreshToken };
 
     } catch (error) {
-          throw new ApiError(500, "Something went wrong while generating the access token and refresh tokens ")
+        throw new ApiError(500, "Something went wrong while generating the access token and refresh tokens ")
     }
 }
 
@@ -91,12 +92,12 @@ const loginUser = asyncHandler(async (req, res) => {
     if (!email && !password) {
         throw new ApiError(400, "Email and password are required.");
     }
-    if(!validateEmail(email)){
-         throw new ApiError(400, "Invalid email format");
+    if (!validateEmail(email)) {
+        throw new ApiError(400, "Invalid email format");
     }
     const user = await User.findOne({ email });
     if (!user) {
-       throw new ApiError(404, "No user found with this email.");
+        throw new ApiError(404, "No user found with this email.");
     }
 
     const isPasswordValid = await user.isPasswordCorrect(password);
@@ -104,52 +105,86 @@ const loginUser = asyncHandler(async (req, res) => {
         throw new ApiError(401, "Invalid password or email please check creds");
     }
 
-    const {accessToken , refreshToken} = await generateAccessAndRefreshTokens(user._id);
+    const { accessToken, refreshToken } = await generateAccessAndRefreshTokens(user._id);
 
-    if(!accessToken && !refreshToken){
-      throw new ApiError(500, "Failed to generate authentication tokens.");
+    if (!accessToken && !refreshToken) {
+        throw new ApiError(500, "Failed to generate authentication tokens.");
     }
 
     user.lastLogin = new Date();
     await user.save();
 
     const loggedInUser = await User.findById(user._id).select("-password -refreshTokens");
-    if(!loggedInUser){
-       throw new ApiError(404, "User not found after login.");
+    if (!loggedInUser) {
+        throw new ApiError(404, "User not found after login.");
     }
 
     res.status(200)
-    .cookie("accessToken" , accessToken , options)
-    .cookie("refreshToken" , refreshToken ,options)
-    .json(new ApiResponse(201 , {user:loggedInUser , accessToken , refreshToken} , "Successfully user logged In"));
+        .cookie("accessToken", accessToken, options)
+        .cookie("refreshToken", refreshToken, options)
+        .json(new ApiResponse(201, { user: loggedInUser, accessToken, refreshToken }, "Successfully user logged In"));
 
 
 })
 
-const logoutUser = asyncHandler(async(req , res)=>{
+const logoutUser = asyncHandler(async (req, res) => {
     const userId = req.user?._id;
-    if(!userId){
-        throw new ApiError(404 , "Invalid access , please login");
+    if (!userId) {
+        throw new ApiError(404, "Invalid access , please login");
     }
 
-    const user = await User.findByIdAndUpdate(userId , 
+    const user = await User.findByIdAndUpdate(userId,
         {
-            $unset : {
-                refreshTokens : 1,
+            $unset: {
+                refreshTokens: 1,
             }
         },
         {
-            new : true,
+            new: true,
         }
     )
 
-    if(!user){
-        throw new ApiError(404 , "failed to clear the refreshTokens");
+    if (!user) {
+        throw new ApiError(404, "failed to clear the refreshTokens");
     }
 
     res.status(201)
-    .clearCookie("accessToken" , options)
-    .clearCookie("refreshToken" , options)
-    .json(new ApiResponse(200 , {} , "user logged out successfully"));
+        .clearCookie("accessToken", options)
+        .clearCookie("refreshToken", options)
+        .json(new ApiResponse(200, {}, "user logged out successfully"));
 })
-export { registerUser , loginUser , logoutUser };
+
+const refreshAccessToken = asyncHandler(async (req, res) => {
+    try {
+        const incomingRefreshToken = req.cookies.refreshToken || req.body.refreshToken;
+        if (!incomingRefreshToken) {
+            throw new ApiError(403, "No tokens are available");
+        }
+        const decoded = jwt.verify(incomingRefreshToken, process.env.REFRESH_TOKEN_SECRET)
+        if (!decoded) {
+            throw new ApiError(401, "failed to decode the refresh tokens");
+        }
+
+        const user = await User.findById(decoded._id);
+        if (!user) {
+            throw new ApiError(404, "No user found");
+        }
+
+        if (incomingRefreshToken !== user.refreshTokens) {
+            throw new ApiError(500, "No tokens matches btw incoming and db tokens");
+        }
+
+        const { accessToken, refreshToken } = await generateAccessAndRefreshTokens(user._id)
+
+        if (!accessToken && !refreshToken) {
+            throw new ApiError(403, "failed to generate the tokens");
+        }
+
+        res.status(200).cookie("accessToken", accessToken, options).cookie("refreshToken", refreshToken, options).json(new ApiResponse(200, { accessToken, refreshToken }, "successfully generated tokens"))
+
+
+    } catch (error) {
+        throw new ApiError(401, error?.message || "Invalid refresh token")
+    }
+})
+export { registerUser, loginUser, logoutUser , refreshAccessToken };
