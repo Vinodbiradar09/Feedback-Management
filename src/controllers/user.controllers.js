@@ -2,9 +2,9 @@ import { ApiError } from "../utils/ApiError.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { User } from "../models/users.model.js";
-import { uploadOnCloudinary } from "../utils/cloudinary.js";
+import { deleteOnCloudinary, uploadOnCloudinary } from "../utils/cloudinary.js";
 import dayjs from "dayjs";
-import { validateEmail, validatePassword } from "../utils/validators.js";
+import { validateEmail, validatePassword, commonPasswords } from "../utils/validators.js";
 import { options } from "../utils/cookies.js";
 import jwt from "jsonwebtoken";
 import { sendEmail } from "../utils/sendEmail.js";
@@ -114,6 +114,7 @@ const loginUser = asyncHandler(async (req, res) => {
     }
 
     user.lastLogin = new Date();
+    user.isActive = true;
     await user.save();
 
     const loggedInUser = await User.findById(user._id).select("-password -refreshTokens");
@@ -288,23 +289,23 @@ const updateUserDetails = asyncHandler(async (req, res) => {
     try {
         session.startTransaction();
 
-        const updatedUser = await User.findByIdAndUpdate(user._id , {
-            $set : updateData,
-            
+        const updatedUser = await User.findByIdAndUpdate(user._id, {
+            $set: updateData,
+
         }, {
-            new : true,
-            runValidators : true,
-            select : "-password -refreshTokens",
+            new: true,
+            runValidators: true,
+            select: "-password -refreshTokens",
             session
         });
 
-        if(!updatedUser){
-                throw new ApiError(404, "User not found");
+        if (!updatedUser) {
+            throw new ApiError(404, "User not found");
         }
 
         await session.commitTransaction();
 
-        return res.status(200).json(new ApiResponse(200 , updatedUser , `successfully updated: ${Object.keys(updateData).join(' ,')}`));
+        return res.status(200).json(new ApiResponse(200, updatedUser, `successfully updated: ${Object.keys(updateData).join(' ,')}`));
     } catch (error) {
         await session.abortTransaction();
         throw error;
@@ -313,4 +314,155 @@ const updateUserDetails = asyncHandler(async (req, res) => {
     }
 });
 
-export { registerUser, loginUser, logoutUser, refreshAccessToken, getProfile, forgotPassword, resetPassword, updateUserDetails };
+const updateUsersProfile = asyncHandler(async (req, res) => {
+    const user = req.user;
+    if (!user) {
+        throw new ApiError(401, "Unauthorized access. Please login");
+    }
+    const profile = req.file?.path;
+    if (!profile) {
+        throw new ApiError(400, "Profile image file is required");
+    }
+
+    const userProfile = await uploadOnCloudinary(profile);
+    if (!userProfile?.secure_url) {
+        throw new ApiError(500, "Failed to upload image to Cloudinary");
+    }
+    const oldUrl = user.userProfile;
+    if (!oldUrl) {
+        throw new ApiError(403, "Old secure url is missing to delete on cloudinary");
+    }
+    const updatedProfile = await User.findByIdAndUpdate(user._id, {
+        $set: {
+            userProfile: userProfile.secure_url,
+        }
+    },
+        {
+            new: true,
+            runValidators: true,
+            select: "-password -refreshTokens"
+        })
+
+    if (!updatedProfile) {
+        throw new ApiError(404, "failed to update the user's profile");
+    }
+
+    const oldProfileDeletion = await deleteOnCloudinary(oldUrl);
+    if (!oldProfileDeletion) {
+        throw new ApiError(500, "failed to delete old user's profile on cloudinary");
+    }
+
+    res.status(200).json(new ApiResponse(200, updatedProfile, "successfully updated user's profile"));
+})
+
+const changePassword = asyncHandler(async (req, res) => {
+
+    const userId = req.user;
+    if (!userId) {
+        throw new ApiError(404, "unauthorized access please login");
+    }
+
+    const fields = ["oldPassword", "newPassword", "retryNewPassword"];
+    const data = {};
+    let hasValidFields = false;
+    fields.forEach((field) => {
+        if (req.body[field] !== undefined && req.body[field] !== null && req.body[field] !== "") {
+            data[field] = req.body[field];
+            hasValidFields = true;
+        }
+    })
+
+    if (!hasValidFields) {
+        throw new ApiError(404, "All the fields are required to change the password");
+    }
+
+    if (!validatePassword(data.newPassword)) {
+        throw new ApiError(402, "password must be atleast six chars");
+    }
+    const user = await User.findById(userId);
+    if (!user) {
+        throw new ApiError(404, "no users found");
+    }
+
+    console.log("pps", data.oldPassword);
+    const isPasswordValid = await user.isPasswordCorrect(data.oldPassword);
+    if (!isPasswordValid) {
+        throw new ApiError(400, "Current password is incorrect");
+    }
+
+    if (data.newPassword !== data.retryNewPassword) {
+        throw new ApiError(403, "There is no match between newPassword and retryNewPassword");
+    }
+
+    if (data.oldPassword === data.newPassword) {
+        throw new ApiError(402, "the new password must be different from old password");
+    }
+    // if(commonPasswords(data.newPassword)){
+    //     throw new ApiError(401 , "password is too easy to guess");
+    // }
+    const updatedUserPassword = user.password = data.newPassword;
+    await user.save();
+
+    if (!updatedUserPassword) {
+        throw new ApiError(500, "failed to update the user's new password");
+    }
+
+    res.status(200).json(new ApiResponse(200, {}, "user password updated successfully"));
+
+})
+
+const softdeactivateAccount = asyncHandler(async (req, res) => {
+    const user = req.user;
+    if (!user) {
+        throw new ApiError(404, "unauthorized access please login");
+    }
+
+    const userActivateFalse = await User.findByIdAndUpdate(user._id, {
+        $set: {
+            isActive: false,
+        }
+    },
+        {
+            new: true,
+            runValidators: true,
+        }).select("-password -refreshTokens");
+
+        if(!userActivateFalse){
+            throw new ApiError(404 , "failed to soft delete the user's account");
+        }
+
+        res.status(200).json(new ApiResponse(200 , userActivateFalse , "successfully soft deleted the user account"))
+})
+
+const getUserById = asyncHandler(async(req , res)=>{
+    const requesterUser = req.user;
+    const {targetUserId} = req.params;
+
+    if(!requesterUser){
+        throw new ApiError(404 , "user not found , unauthorized access");
+    }
+     if (!targetUserId || !mongoose.Types.ObjectId.isValid(targetUserId)) {
+        throw new ApiError(400, "Invalid user ID format");
+    }
+   
+    const isAuthorized = requesterUser.role === "manager" || requesterUser._id.toString() === targetUserId.toString();
+
+    if(!isAuthorized){
+         throw new ApiError(403, "Forbidden: Insufficient permissions");
+    }
+
+    const targetedUser = await User.findById(targetUserId).select("-password -refreshTokens");
+
+    if(!targetedUser){
+         throw new ApiError(404, "User not found");
+    }
+    res.status(200).json(new ApiResponse(200 , targetedUser , "user successfully fetched by Id"));
+})
+
+const updateUserRole = asyncHandler(async(req , res)=>{
+     // first the role is updated by only mangers
+})
+
+
+
+export { registerUser, loginUser, logoutUser, refreshAccessToken, getProfile, forgotPassword, resetPassword, updateUserDetails, updateUsersProfile, changePassword , softdeactivateAccount , getUserById};
