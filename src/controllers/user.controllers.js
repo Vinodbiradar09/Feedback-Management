@@ -7,6 +7,8 @@ import dayjs from "dayjs";
 import { validateEmail, validatePassword } from "../utils/validators.js";
 import { options } from "../utils/cookies.js";
 import jwt from "jsonwebtoken";
+import { sendEmail } from "../utils/sendEmail.js";
+import mongoose from "mongoose";
 
 const generateAccessAndRefreshTokens = async (userId) => {
     try {
@@ -187,4 +189,128 @@ const refreshAccessToken = asyncHandler(async (req, res) => {
         throw new ApiError(401, error?.message || "Invalid refresh token")
     }
 })
-export { registerUser, loginUser, logoutUser , refreshAccessToken };
+
+const forgotPassword = asyncHandler(async (req, res) => {
+    const { email } = req.body;
+    if (!email) {
+        throw new ApiError(403, "Email is required to reset password");
+    }
+
+    const user = await User.findOne({ email });
+    if (!user) {
+        throw new ApiError(405, "Invalid email , If the email exists, a reset link will be sent");
+    }
+
+    const { accessToken, refreshToken } = await generateAccessAndRefreshTokens(user._id);
+    if (!accessToken && !refreshToken) {
+        throw new ApiError(402, "failed to generate the tokens");
+    }
+
+    const resetLink = `${process.env.BASE_URL}/reset-password?token=${accessToken}`;
+    const htmlContent =
+        `
+    <p>Hello ${user.name}, </p>
+    <p>You requested a password reset </p>
+    <p>Click the link below to reset your password:</p>
+    <a href="${resetLink}">${resetLink}</a>
+    <p>This link will expire in 15 minutes.</p>
+    `;
+
+    await sendEmail({
+        to: user.email,
+        subject: "reset your password",
+        html: htmlContent,
+    })
+
+    res.status(200).json(new ApiResponse(200, "If the email exists, a reset link will be sent."));
+})
+
+const resetPassword = asyncHandler(async (req, res) => {
+    const { token, newPassword } = req.body;
+    if (!token || !newPassword) {
+        throw new ApiError(406, "Token and new password are required.")
+    }
+
+    const decode = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
+    if (!decode) {
+        throw new ApiError(403, "failed to decode the tokens");
+    }
+
+    const userId = decode._id;
+    if (!userId) {
+        throw new ApiError(402, "failed to get the userID");
+    }
+    const user = await User.findById(userId).select("-password -refreshTokens");
+    if (!user) {
+        throw new ApiError(404, "failed to get the user");
+    }
+
+    user.password = newPassword;
+    await user.save();
+
+
+    res.status(200).json(new ApiResponse(200, user, "Password reset successful."));
+})
+
+const getProfile = asyncHandler(async (req, res) => {
+    const user = req.user;
+    if (!user) {
+        throw new ApiError(403, "failed to get the user");
+    }
+    res.status(200).json(new ApiResponse(200, user, "fetched the user profile"));
+})
+
+const updateUserDetails = asyncHandler(async (req, res) => {
+    const user = req.user;
+    if (!user) {
+        throw new ApiError(403, "Unauthorized access - please login");
+    }
+    const fields = ["name", "email"];
+    const updateData = {};
+
+    let hasValidFields = false;
+
+    fields.forEach(field => {
+        if (req.body[field] !== undefined && req.body[field] !== null && req.body[field] !== "") {
+            updateData[field] = req.body[field];
+            hasValidFields = true;
+        }
+    })
+
+    if (!hasValidFields) {
+        return res.status(200).json(
+            new ApiResponse(200, user, "No valid fields provided to update")
+        );
+    }
+
+    const session = await mongoose.startSession();
+
+    try {
+        session.startTransaction();
+
+        const updatedUser = await User.findByIdAndUpdate(user._id , {
+            $set : updateData,
+            
+        }, {
+            new : true,
+            runValidators : true,
+            select : "-password -refreshTokens",
+            session
+        });
+
+        if(!updatedUser){
+                throw new ApiError(404, "User not found");
+        }
+
+        await session.commitTransaction();
+
+        return res.status(200).json(new ApiResponse(200 , updatedUser , `successfully updated: ${Object.keys(updateData).join(' ,')}`));
+    } catch (error) {
+        await session.abortTransaction();
+        throw error;
+    } finally {
+        session.endSession();
+    }
+});
+
+export { registerUser, loginUser, logoutUser, refreshAccessToken, getProfile, forgotPassword, resetPassword, updateUserDetails };
