@@ -427,42 +427,338 @@ const softdeactivateAccount = asyncHandler(async (req, res) => {
             runValidators: true,
         }).select("-password -refreshTokens");
 
-        if(!userActivateFalse){
-            throw new ApiError(404 , "failed to soft delete the user's account");
-        }
+    if (!userActivateFalse) {
+        throw new ApiError(404, "failed to soft delete the user's account");
+    }
 
-        res.status(200).json(new ApiResponse(200 , userActivateFalse , "successfully soft deleted the user account"))
+    res.status(200).json(new ApiResponse(200, userActivateFalse, "successfully soft deleted the user account"))
 })
 
-const getUserById = asyncHandler(async(req , res)=>{
+const getUserById = asyncHandler(async (req, res) => {
     const requesterUser = req.user;
-    const {targetUserId} = req.params;
+    const { targetUserId } = req.params;
 
-    if(!requesterUser){
-        throw new ApiError(404 , "user not found , unauthorized access");
+    if (!requesterUser) {
+        throw new ApiError(404, "user not found , unauthorized access");
     }
-     if (!targetUserId || !mongoose.Types.ObjectId.isValid(targetUserId)) {
+    if (!targetUserId || !mongoose.Types.ObjectId.isValid(targetUserId)) {
         throw new ApiError(400, "Invalid user ID format");
     }
-   
-    const isAuthorized = requesterUser.role === "manager" || requesterUser._id.toString() === targetUserId.toString();
 
-    if(!isAuthorized){
-         throw new ApiError(403, "Forbidden: Insufficient permissions");
+    const isAuthorized = requesterUser.role === "manager" || requesterUser._id.toString() === targetUserId.toString() || requesterUser.role === "admin";
+
+    if (!isAuthorized) {
+        throw new ApiError(403, "Forbidden: Insufficient permissions");
     }
 
     const targetedUser = await User.findById(targetUserId).select("-password -refreshTokens");
 
-    if(!targetedUser){
-         throw new ApiError(404, "User not found");
+    if (!targetedUser) {
+        throw new ApiError(404, "User not found");
     }
-    res.status(200).json(new ApiResponse(200 , targetedUser , "user successfully fetched by Id"));
+    res.status(200).json(new ApiResponse(200, targetedUser, "user successfully fetched by Id"));
 })
 
-const updateUserRole = asyncHandler(async(req , res)=>{
-     // first the role is updated by only mangers
+const updateUserRole = asyncHandler(async (req, res) => {
+
+    const adminUser = req.user;
+    const { targetedUserId } = req.params;
+    const { role } = req.body;
+
+    if (!adminUser) {
+        throw new ApiError(404, "Admin not found or unauthorized access");
+    }
+    if (!targetedUserId || !mongoose.Types.ObjectId.isValid(targetedUserId)) {
+        throw new ApiError(400, "Invalid user ID format");
+    }
+    if (!role) {
+        throw new ApiError(402, "role must be required");
+    }
+    const validRoles = ["manager", "employee"];
+    if (!validRoles.includes(role)) {
+        throw new ApiError(400, "Invalid role provided");
+    }
+    const targetUser = await User.findById(targetedUserId).select("-password -refreshTokens");
+    let updatedRole;
+
+    if (targetUser.role === role) {
+        throw new ApiError(401, "can't change the same role twice");
+    }
+
+    if (targetUser.role === "admin") {
+        throw new ApiError(408, "you can't promote the user to admin , invalid access and unauthorized activity");
+    }
+
+    if (adminUser.role === "admin" && targetUser.isActive === true && targetUser.role !== role && targetUser.role !== "admin") {
+        updatedRole = await User.findByIdAndUpdate(targetedUserId, {
+            $set: {
+                role,
+            }
+        },
+            {
+                new: true,
+                runValidators: true,
+            })
+    }
+
+    if (!updatedRole) {
+        throw new ApiError(500, "failed to update the users role");
+    }
+    res.status(200).json(new ApiResponse(200, updatedRole, "successfully updated the users role"));
 })
 
+const searchUsers = asyncHandler(async (req, res) => {
+    const startTime = Date.now();
+
+    if (!["manager", "admin"].includes(req.user.role)) {
+        throw new ApiError(403, "Only admin and managers can search users");
+    }
+    const {
+        query = "",
+        page = 1,
+        limit = 10,
+        sortBy = "name",
+        sortOrder = "asc"
+    } = req.query;
+    if (!query || !query.trim().length < 2) {
+        throw new ApiError(400, "Search query must be at least 2 characters long");
+    }
+
+    const sanitizedQuery = query.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const searchRegex = new RegExp(sanitizedQuery, 'i');
+
+    const pageNum = Math.max(1, parseInt(page));
+    const pageSize = Math.min(50, Math.max(1, parseInt(limit)));
+    const skip = (pageNum - 1) * pageSize;
+
+    const [result] = await User.aggregate([
+        {
+            $match: {
+                isActive: true,
+                $or: [
+                    { email: searchRegex },
+                    { name: searchRegex },
+                ]
+            }
+        },
+        {
+            $addFields: {
+                relevanceScore: {
+                    $sum: [
+                        { $cond: [{ $eq: ["$email", query.toLowerCase().trim()] }, 100, 0] },
+                        { $cond: [{ $eq: [{ $toLower: "$name" }, query.toLowerCase().trim()] }, 95, 0] },
+                        { $cond: [{ $regexMatch: { input: "$email", regex: new RegExp(`^${sanitizedQuery}`, 'i') } }, 50, 0] },
+                        { $cond: [{ $regexMatch: { input: "$name", regex: new RegExp(`^${sanitizedQuery}`, 'i') } }, 45, 0] },
+                        { $cond: [{ $regexMatch: { input: "$email", regex: searchRegex } }, 25, 0] },
+                        { $cond: [{ $regexMatch: { input: "$name", regex: searchRegex } }, 20, 0] }
+                    ]
+                }
+            }
+        },
+        {
+            $lookup: {
+                from: "teams",
+                let: { userId: "$_id" },
+                pipeline: [
+                    {
+                        $match: {
+                            $expr: {
+                                $and: [
+                                    { $in: ["$$userId", "$employeeIds"] },
+                                    { $eq: ["$isActive", true] },
+                                ]
+                            }
+                        }
+                    },
+                    {
+                        $lookup: {
+                            from: "users",
+                            localField: "managerId",
+                            foreignField: "_id",
+                            as: "manager",
+                        }
+                    },
+                    {
+                        $project: {
+                            _id: 1,
+                            teamName: 1,
+                            managerId: 1,
+                            manager: {
+                                $arrayElemAt: [
+                                    {
+                                        $map: {
+                                            input: "$manager",
+                                            as: "mgr",
+                                            in: {
+                                                _id: "$$mgr._id",
+                                                name: "$$mgr.name",
+                                                email: "$$mgr.email",
+                                            }
+                                        }
+                                    }, 0
+                                ]
+                            },
+                            createdAt: 1
+
+                        }
+                    }
+                ],
+                as: "teamAssignments",
+            }
+        },
+
+        {
+            $lookup: {
+                from: "feedbacks",
+                let: { userId: "$_id" },
+                pipeline: [
+                    {
+                        $match: {
+                            $expr: {
+                                $and: [
+                                    { $eq: ["$toEmployeeId", "$userId"] },
+                                    { $eq: ["$isDeleted", false] },
+                                ]
+                            }
+                        }
+                    },
+                    {
+                        $sort: { createdAt: -1 },
+                    },
+                    {
+                        $limit: 1
+                    },
+                    {
+                        $project: {
+                            _id: 1,
+                            sentiment: 1,
+                            isAcknowledged: 1,
+                            createdAt: 1
+                        }
+                    }
+                ],
+                as: "latestFeedback"
+            }
+        },
+        {
+            $lookup: {
+                from: "feedbacks",
+                let: { userId: "$_id" },
+                pipeline: [
+                    {
+                        $match: {
+                            $expr: {
+                                $and: [
+                                    { $eq: ["$toEmployeeId", "$userId"] },
+                                    { $eq: ["$isDeleted", false] },
+                                ]
+                            }
+                        }
+                    },
+                    {
+                        $count: "total",
+                    }
+                ],
+                as: "feedbackCount"
+            }
+        },
+        {
+            $project: {
+                _id: 1,
+                email: 1,
+                name: 1,
+                role: 1,
+                userProfile: 1,
+                isActive: 1,
+                lastLogin: 1,
+                createdAt: 1,
+                updatedAt: 1,
+                relevanceScore: 1,
+
+                teamInfo: {
+                    isAssigned: { $gt: [{ $size: "$teamAssignments" }, 0] },
+                    teams: "$teamAssignments",
+                    totalTeams: { $size: "$teamAssignments" }
+                },
+                feedbackInfo: {
+                    totalFeedbacks: { $ifNull: [{ $arrayElemAt: ["$feedbackCount.total", 0] }, 0] },
+                    latestFeedback: { $arrayElemAt: ["$latestFeedback", 0] }
+                }
+            }
+        },
+        {
+            $sort: {
+                relevanceScore: -1,
+                [sortBy]: sortOrder === "desc" ? -1 : 1
+            }
+        },
+        {
+            $facet: {
+                users: [
+                    { $skip: skip },
+                    { $limit: pageSize }
+                ],
+                totalCount: [
+                    { $count: "count" }
+                ]
+            }
+        }
+    ])
+    const users = result.users || [];
+    const totalCount = result.totalCount[0]?.count || 0;
+    const totalPages = Math.ceil(totalCount / pageSize);
+    const hasNextPage = pageNum < totalPages;
+    const hasPreviousPage = pageNum > 1;
+    const executionTime = Date.now() - startTime;
+
+    const formattedUsers = users.map(user => ({
+        _id: user._id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        userProfile: user.userProfile,
+        isActive: user.isActive,
+        lastLogin: user.lastLogin,
+        createdAt: user.createdAt,
+        updatedAt: user.updatedAt,
+
+        teamAssignments: {
+            isAssigned: user.teamInfo.isAssigned,
+            totalTeams: user.teamInfo.totalTeams,
+            teams: user.teamInfo.teams
+        },
+
+        feedbackSummary: {
+            totalReceived: user.feedbackInfo.totalFeedbacks,
+            latestFeedback: user.feedbackInfo.latestFeedback
+        },
+        searchRelevance: user.relevanceScore
+    }));
+
+    const response = {
+        users: formattedUsers,
+        pagination: {
+            currentPage: pageNum,
+            pageSize,
+            totalCount,
+            totalPages,
+            hasNextPage,
+            hasPreviousPage
+        },
+
+        searchQuery: query,
+        executionTime: `${executionTime}ms`
+    };
+
+    return res.status(200).json(
+        new ApiResponse(
+            200,
+            response,
+            `Found ${users.length} users matching "${query}" with complete details`
+        )
+    );
+
+});
 
 
-export { registerUser, loginUser, logoutUser, refreshAccessToken, getProfile, forgotPassword, resetPassword, updateUserDetails, updateUsersProfile, changePassword , softdeactivateAccount , getUserById};
+export { registerUser, loginUser, logoutUser, refreshAccessToken, getProfile, forgotPassword, resetPassword, updateUserDetails, updateUsersProfile, changePassword, softdeactivateAccount, getUserById, updateUserRole , searchUsers };

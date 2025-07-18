@@ -31,8 +31,8 @@ const userSchema = new Schema(
             type: String,
             required: [true, 'Role is required'],
             enum: {
-                values: ['manager', 'employee'],
-                message: 'Role must be either manager or employee'
+                values: ['manager', 'employee' , 'admin'],
+                 message: 'Role must be admin, manager, or employee'
             }
         },
         userProfile: {
