@@ -20,7 +20,9 @@ app.use(express.static("public"));
 app.use(cookieParser());
 
 import { router } from "./src/routes/users.routes.js";
+import { teamrouter } from "./src/routes/teams.routes.js";
 
 app.use("/api/v1/users" , router);
+app.use("/api/v1/team" , teamrouter);
 
 export {app};
