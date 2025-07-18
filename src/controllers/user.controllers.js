@@ -760,5 +760,98 @@ const searchUsers = asyncHandler(async (req, res) => {
 
 });
 
+const getAllUsersWhoseRoleIsEmployee = asyncHandler(async (req, res) => {
+    const requesterUser = req.user;
 
-export { registerUser, loginUser, logoutUser, refreshAccessToken, getProfile, forgotPassword, resetPassword, updateUserDetails, updateUsersProfile, changePassword, softdeactivateAccount, getUserById, updateUserRole , searchUsers };
+    if (!requesterUser) {
+        throw new ApiError(404, "unauthorized access , please login");
+    }
+    if (!["manager", "admin"].includes(requesterUser.role)) {
+
+        throw new ApiError(409, "forbidden error , you are not authorized ");
+    }
+    const {
+        page = 1,
+        limit = 10,
+    } = req.query;
+
+    const pageNum = Math.max(1, parseInt(page));
+    const pageSize = Math.min(100, Math.max(1, parseInt(limit)));
+    const skip = (pageNum - 1) * pageSize;
+
+    const filter = {
+        role: "employee",
+        isActive: true,
+    };
+
+    const users = await User.find(filter).skip(skip).limit(pageSize).sort({ createdAt: 1 }).select("-password -refreshTokens");
+    if (!users || users.length < 0) {
+        throw new ApiError(404, "No employees in db");
+    }
+
+    const totalCount = await User.countDocuments(filter);
+    const totalPages = Math.ceil(totalCount / pageSize);
+
+    res.status(200).json({
+        users,
+        pagination: {
+            currentPage: pageNum,
+            pageSize,
+            totalCount,
+            totalPages,
+            hasNextPage: pageNum < totalPages,
+            hasPreviousPage: pageNum > 1
+        }
+    });
+
+})
+
+const getAllUsersWhoseRoleIsManagerAndEmployee = asyncHandler(async (req, res) => {
+    const adminUser = req.user;
+    if (!adminUser && adminUser.role !== "admin") {
+        throw new ApiError(409, "unauthorized access and invalid user");
+    }
+    const {
+        page = 1,
+        limit = 10,
+    } = req.query;
+
+    const pageNum = Math.max(1, parseInt(page));
+    const pageSize = Math.min(100, Math.max(1, parseInt(limit)));
+    const skip = (pageNum - 1) * pageSize;
+
+    const filter = {
+        role: {$in: ["manager" , "employee"]},
+        isActive: true,
+    }
+
+    const users = await User.find(filter)
+        .skip(skip)
+        .limit(pageSize)
+        .sort({ createdAt: 1 })
+        .select("-password -refreshTokens");
+
+    if (!users || users.length < 0) {
+        throw new ApiError(408, "No employee and managers in db");
+    }
+
+    const totalCount = await User.countDocuments(filter);
+    const totalPages = Math.ceil(totalCount / pageSize);
+
+     res.status(200).json({
+        users,
+        pagination: {
+            currentPage: pageNum,
+            pageSize,
+            totalCount,
+            totalPages,
+            hasNextPage: pageNum < totalPages,
+            hasPreviousPage: pageNum > 1
+        }
+    });
+})
+
+
+
+
+export { registerUser, loginUser, logoutUser, refreshAccessToken, getProfile, forgotPassword, resetPassword, updateUserDetails, updateUsersProfile, changePassword, softdeactivateAccount, getUserById, updateUserRole, searchUsers, getAllUsersWhoseRoleIsEmployee , getAllUsersWhoseRoleIsManagerAndEmployee };
