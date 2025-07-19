@@ -7,18 +7,12 @@ const teamSchema = new Schema(
             type: mongoose.Schema.Types.ObjectId,
             ref: 'User',
             required: [true, 'Manager ID is required'],
-            index : true
+            index: true
         },
         employeeIds: [{
             type: mongoose.Schema.Types.ObjectId,
             ref: 'User',
-            validate: {
-                validator: function (employeeIds) {
-                    return employeeIds.length > 0;
-                },
-                message: 'Team must have at least one employee'
-            },
-            index : true
+            index: true
         }],
         teamName: {
             type: String,
@@ -35,5 +29,5 @@ const teamSchema = new Schema(
     { timestamps: true }
 )
 teamSchema.plugin(mongooseAggregatePaginate);
-const Team = model("Team" , teamSchema);
-export{Team};
+const Team = model("Team", teamSchema);
+export { Team };
