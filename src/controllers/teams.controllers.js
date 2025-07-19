@@ -191,12 +191,152 @@ const removeEmployeeFromTeam = asyncHandler(async (req, res) => {
     );
 })
 
-const getMyTeams = asyncHandler(async(req , res)=>{
-    // first get the manager from the req.user , check it ;
-    // now do the aggregation for it first match the manager id ,
-    // now do lookup from the team , 
-    // and get all the details of the team , 
+const getMyTeams = asyncHandler(async (req, res) => {
+    const teamManager = req.user;
 
-    
-})
-export { createTeam, addTeamEmployees, removeEmployeeFromTeam };
+    if (!teamManager || teamManager.role !== "manager") {
+        throw new ApiError(403, "Unauthorized access: Only managers can access");
+    }
+
+    try {
+      
+        const managerObjectId = new mongoose.Types.ObjectId(teamManager._id);
+
+       
+        const page = Math.max(1, parseInt(req.query.page) || 1);
+        const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
+        const skip = (page - 1) * limit;
+
+        const aggregationPipeline = [
+            {
+                $match: {
+                    managerId: managerObjectId,
+                    isActive: true
+                }
+            },
+            {
+                $lookup: {
+                    from: "users",
+                    localField: "managerId",
+                    foreignField: "_id",
+                    as: "managerDetails",
+                    pipeline: [
+                        {
+                            $project: {
+                                _id: 1,
+                                name: 1,
+                                email: 1,
+                                role: 1,
+                                userProfile: 1,
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                $lookup: {
+                    from: "users",
+                    localField: "employeeIds",
+                    foreignField: "_id",
+                    as: "employeesDetails",
+                    pipeline: [
+                        {
+                            $project: {
+                                _id: 1,
+                                name: 1,
+                                email: 1,
+                                role: 1,
+                                userProfile: 1,
+                                isActive: 1  
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                $addFields: {
+                    manager: { $arrayElemAt: ["$managerDetails", 0] },
+                    employees: "$employeesDetails",
+                    totalEmployees: { $size: "$employeesDetails" },
+                    activeEmployees: {
+                        $size: {
+                            $filter: {
+                                input: "$employeesDetails",
+                                cond: { $eq: ["$$this.isActive", true] }
+                            }
+                        }
+                    }
+                }
+            },
+            {
+                $project: {
+                    _id: 1,
+                    teamName: 1,
+                    isActive: 1,
+                    createdAt: 1,
+                    manager: 1,
+                    employees: 1,
+                    totalEmployees: 1,
+                    activeEmployees: 1,
+                  
+                }
+            },
+            {
+                $sort: { createdAt: -1 }
+            }
+        ];
+
+      
+        aggregationPipeline.push(
+            { $skip: skip },
+            { $limit: limit }
+        );
+
+      
+        const [paginatedResult, totalCountResult] = await Promise.all([
+            Team.aggregate(aggregationPipeline),
+            Team.countDocuments({ 
+                managerId: managerObjectId, 
+                isActive: true 
+            })
+        ]);
+
+        if (!paginatedResult || paginatedResult.length === 0) {
+            return res.status(200).json(
+                new ApiResponse(200, {
+                    teams: [],
+                    pagination: {
+                        currentPage: page,
+                        totalPages: 0,
+                        totalTeams: 0,
+                        hasNextPage: false,
+                        hasPrevPage: false
+                    }
+                }, "No teams found for this manager")
+            );
+        }
+
+        const totalTeams = totalCountResult;
+        const totalPages = Math.ceil(totalTeams / limit);
+        const hasNextPage = page < totalPages;
+        const hasPrevPage = page > 1;
+
+        res.status(200).json(
+            new ApiResponse(200, {
+                teams: paginatedResult,
+                pagination: {
+                    currentPage: page,
+                    totalPages,
+                    totalTeams,
+                    hasNextPage,
+                    hasPrevPage
+                }
+            }, "Successfully retrieved manager's teams")
+        );
+
+    } catch (error) {
+        console.error('Error in getMyTeams:', error);
+        throw new ApiError(500, "Failed to retrieve teams");
+    }
+});
+export { createTeam, addTeamEmployees, removeEmployeeFromTeam, getMyTeams };
