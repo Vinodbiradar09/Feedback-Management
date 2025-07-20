@@ -595,20 +595,20 @@ const makeIsActiveForTeam = asyncHandler(async (req, res) => {
         }
     )
     if (!updatedTeam) {
-        throw new ApiError(404 , "Failed to active the team");
+        throw new ApiError(404, "Failed to active the team");
     }
 
-    res.status(200).json(new ApiResponse(200 , updatedTeam , "Successfully activated the team"));
+    res.status(200).json(new ApiResponse(200, updatedTeam, "Successfully activated the team"));
 })
 
-const getTeamMembers = asyncHandler(async(req , res)=>{
-    const {teamId} = req.params;
+const getTeamMembers = asyncHandler(async (req, res) => {
+    const { teamId } = req.params;
     const authorizedUser = req.user;
 
-    if(!teamId || !mongoose.Types.ObjectId.isValid(teamId)){
-        throw new ApiError(401 , "Invalid Team Id format");
+    if (!teamId || !mongoose.Types.ObjectId.isValid(teamId)) {
+        throw new ApiError(401, "Invalid Team Id format");
     }
-    if(!["manager" , "admin"].includes(authorizedUser.role)){
+    if (!["manager", "admin"].includes(authorizedUser.role)) {
         throw new ApiError(403, "Unauthorized: Only admins and managers can access team members");
     }
     const page = Math.max(1, parseInt(req.query.page) || 1);
@@ -616,24 +616,24 @@ const getTeamMembers = asyncHandler(async(req , res)=>{
     const skip = (page - 1) * limit;
 
     const team = await Team.findOne({
-        _id : teamId,
-        isActive : true,
+        _id: teamId,
+        isActive: true,
     }).select("managerId employeeIds")
 
-    if(!team){
-        throw new ApiError(404 , "Team Not found");
+    if (!team) {
+        throw new ApiError(404, "Team Not found");
     }
-    if( authorizedUser.role === "manager" && !team.managerId.equals(authorizedUser._id)){
-       throw new ApiError(403, "Unauthorized: You don't manage this team");
+    if (authorizedUser.role === "manager" && !team.managerId.equals(authorizedUser._id)) {
+        throw new ApiError(403, "Unauthorized: You don't manage this team");
     }
-    const memberIds = authorizedUser.role === "admin" ? [... team.employeeIds , team.managerId] : team.employeeIds;
+    const memberIds = authorizedUser.role === "admin" ? [...team.employeeIds, team.managerId] : team.employeeIds;
     const totalMembers = memberIds.length;
 
-    const members = await User.aggregate([ 
+    const members = await User.aggregate([
         {
-            $match : {
-                _id : {$in : memberIds},
-                isActive : true,
+            $match: {
+                _id: { $in: memberIds },
+                isActive: true,
             }
         },
         {
@@ -654,19 +654,19 @@ const getTeamMembers = asyncHandler(async(req , res)=>{
             }
         },
         {
-            $sort: { 
+            $sort: {
                 isManager: -1,  // Managers first
-                name: 1 
+                name: 1
             }
         }
 
     ])
 
-    if(!members || members.length === 0){
-         throw new ApiError(404 , "failed to get the members of the team");
+    if (!members || members.length === 0) {
+        throw new ApiError(404, "failed to get the members of the team");
     }
 
-     const response = {
+    const response = {
         teamId: team._id,
         teamName: team.teamName,
         members,
@@ -685,7 +685,7 @@ const getTeamMembers = asyncHandler(async(req , res)=>{
 
 })
 
-const transferEmployee = asyncHandler(async(req , res)=>{
+const transferEmployee = asyncHandler(async (req, res) => {
     // only admins and managers can do this , 
     // get the teamId for which we are trasfering , check it 
     // get the employee Id from the body , check it ,
@@ -695,36 +695,235 @@ const transferEmployee = asyncHandler(async(req , res)=>{
     // now pull from the old team and addToSet to the new team
     // Prevent transfers to the same team (fromTeamId === toTeamId)
     // Reject if employee has "manager" role
-    const {sourceTeamId , destinationTeamId} = req.params;
-    const {employeeIds} = req.body; 
+    const { sourceTeamId, destinationTeamId } = req.params;
+    const { employeeIds } = req.body;
     const authorizedUser = req.user;
-    if(!sourceTeamId || !mongoose.Types.ObjectId.isValid(sourceTeamId)){
-        throw new ApiError(402 , "Invalid source team Id format");
+    if (!sourceTeamId || !mongoose.Types.ObjectId.isValid(sourceTeamId)) {
+        throw new ApiError(402, "Invalid source team Id format");
     }
 
-    if(!destinationTeamId || !mongoose.Types.ObjectId.isValid(destinationTeamId)){
-        throw new ApiError(402 , "Invalid destination team Id format");
+    if (!destinationTeamId || !mongoose.Types.ObjectId.isValid(destinationTeamId)) {
+        throw new ApiError(402, "Invalid destination team Id format");
     }
 
     if (!employeeIds || !Array.isArray(employeeIds) || employeeIds.length === 0) {
         throw new ApiError(400, "At least one valid employee ID is required to transfer");
     }
-    if(authorizedUser.role !== "admin"){
-        throw new ApiError(404 , "Invalid access only admin can transfer the employees");
+    if (authorizedUser.role !== "admin") {
+        throw new ApiError(404, "Invalid access only admin can transfer the employees");
     }
 
 
 })
 
-const replaceTeamManager = asyncHandler(async(req , res)=>{
+const replaceTeamManager = asyncHandler(async (req, res) => {
+    const { teamId } = req.params;
+    const { newManagerId } = req.body;
+    const authorizedUser = req.user;
 
+
+    if (!mongoose.Types.ObjectId.isValid(teamId)) {
+        throw new ApiError(400, "Invalid team ID format");
+    }
+    if (!mongoose.Types.ObjectId.isValid(newManagerId)) {
+        throw new ApiError(400, "Invalid new manager ID format");
+    }
+    if (authorizedUser.role !== "admin") {
+        throw new ApiError(403, "Only administrators can replace team managers");
+    }
+
+
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+
+        const [team, newManager] = await Promise.all([
+            Team.findOne({ _id: teamId, isActive: true }).session(session),
+            User.findOne({
+                _id: newManagerId,
+                isActive: true,
+                role: "manager"
+            }).session(session)
+        ]);
+
+
+        if (!team) throw new ApiError(404, "Team not found or inactive");
+        if (!newManager) throw new ApiError(404, "New manager not found, inactive, or not a manager");
+        if (team.managerId.equals(newManagerId)) {
+            throw new ApiError(400, "New manager is already the current manager");
+        }
+        const newManagerObjectId = new mongoose.Types.ObjectId(newManagerId);
+        const updatedTeam = await Team.findByIdAndUpdate(
+            teamId,
+            { $set: { managerId: newManagerId } },
+            { new: true, runValidators: true, session }
+        );
+
+        if (!updatedTeam) {
+            throw new ApiError(500, "Failed to update team manager");
+        }
+        const previousManager = await User.findById(team.managerId)
+            .select("name email userProfile")
+            .session(session);
+
+
+        await session.commitTransaction();
+        const response = {
+            team: {
+                id: updatedTeam._id,
+                name: updatedTeam.teamName,
+                previousManager: {
+                    id: team.managerId,
+                    name: previousManager?.name,
+                    email: previousManager?.email,
+                    profile: previousManager?.userProfile
+                },
+                newManager: {
+                    id: newManager._id,
+                    name: newManager.name,
+                    email: newManager.email,
+                    profile: newManager.userProfile
+                },
+                updatedAt: updatedTeam.updatedAt
+            }
+        };
+
+        return res.status(200).json(
+            new ApiResponse(200, response, "Team manager successfully replaced")
+        );
+    } catch (error) {
+        await session.abortTransaction();
+        throw error;
+    } finally {
+        session.endSession();
+    }
+});
+
+const getEmployeeTeam = asyncHandler(async (req, res) => {
+
+    const { employeeId } = req.params;
+    const authorizedUser = req.user;
+
+    if (!employeeId || !mongoose.Types.ObjectId.isValid(employeeId)) {
+        throw new ApiError(402, "Inavlid employee id format");
+    }
+    if (!["manager", "admin"].includes(authorizedUser.role)) {
+        throw new ApiError(402, "Only manager / admin can access the team details through the employee");
+    }
+    const employee = await User.findOne({
+        _id: employeeId,
+        isActive: true,
+        role: "employee"
+    }).select("_id name email");
+
+    if (!employee) {
+        throw new ApiError(404, "Active employee not found or invalid role");
+    }
+    const result = await Team.aggregate([
+        {
+            $match: {
+                employeeIds: new mongoose.Types.ObjectId(employeeId),
+                isActive: true
+            }
+        },
+        {
+            $lookup: {
+                from: "users",
+                localField: "managerId",
+                foreignField: "_id",
+                as: "managerDetails",
+                pipeline: [
+                    {
+                        $project: {
+                            name: 1,
+                            isActive: 1,
+                            // role : 1,
+                            userProfile: 1,
+                            email: 1,
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            $lookup: {
+                from: "users",
+                localField: "employeeIds",
+                foreignField: "_id",
+                as: "employeesDetails",
+                pipeline: [
+                    {
+                        $match: { isActive: true }
+                    },
+                    {
+                        $project: {
+                            name: 1,
+                            email: 1,
+                            role: 1,
+                            userProfile: 1
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            $unwind: {
+                path: "$managerDetails",
+                preserveNullAndEmptyArrays: true
+            }
+        },
+        {
+            $project: {
+                teamName: 1,
+                isActive: 1,
+                manager: "$managerDetails",
+                employees: {
+                    $filter: {
+                        input: "$employeesDetails",
+                        as: "employee",
+                        cond: { $ne: ["$$employee._id", employeeId] }
+                    }
+                },
+                currentEmployee: {
+                    $arrayElemAt: [
+                        {
+                            $filter: {
+                                input: "$employeesDetails",
+                                as: "emp",
+                                cond: { $eq: ["$$emp._id", employeeId] }
+                            }
+                        },
+                        0
+                    ]
+                }
+            }
+        },
+        {
+            $addFields: {
+                teamName: "$teamName",
+                employeeCount: { $size: "$employees" }
+            }
+        }
+    ])
+
+    if (!result || result.length === 0) {
+        throw new ApiError(404, "Failed to fetch the team details through employee");
+    }
+
+    const responseData = result.map(team => ({
+        teamName: team.teamName,
+        isActive: team.isActive,
+        manager: team.manager,
+        currentEmployee: team.currentEmployee,
+        teamMembers: team.employees,
+        totalMembers: team.employeeCount + 1
+    }))
+
+    res.status(200).json(new ApiResponse(200, responseData[0], "successfully fetched the team detail by employee"));
 })
 
-const getEmployeeTeam = asyncHandler(async(req ,res)=>{
-    
-})
-
-const getAvailableEmployees = asyncHandler(async(req , res)=>{
+const getAvailableEmployees = asyncHandler(async (req, res) => {
 
 })
-export { createTeam, addTeamEmployees, removeEmployeeFromTeam, getMyTeams, getTeamDetailsById, updateTeamDetails, softDeleteTeam , makeIsActiveForTeam , getTeamMembers};
+export { createTeam, addTeamEmployees, removeEmployeeFromTeam, getMyTeams, getTeamDetailsById, updateTeamDetails, softDeleteTeam, makeIsActiveForTeam, getTeamMembers, transferEmployee, replaceTeamManager, getEmployeeTeam, getAvailableEmployees };
