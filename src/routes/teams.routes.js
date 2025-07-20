@@ -1,6 +1,6 @@
 import {Router} from "express";
 import { verifyJwt } from "../middlewares/auth.middleware.js";
-import {createTeam , addTeamEmployees , removeEmployeeFromTeam  , getMyTeams}  from "../controllers/teams.controllers.js";
+import {createTeam , addTeamEmployees , removeEmployeeFromTeam  , getMyTeams  , getTeamDetailsById , updateTeamDetails , softDeleteTeam , makeIsActiveForTeam}  from "../controllers/teams.controllers.js";
 
 const teamrouter = Router();
 
@@ -11,4 +11,12 @@ teamrouter.route("/addEmployee/:teamId").patch(verifyJwt , addTeamEmployees);
 teamrouter.route("/removeEmplyee/:teamId").patch(verifyJwt , removeEmployeeFromTeam);
 
 teamrouter.route("/getMyTeams").get(verifyJwt , getMyTeams );
+
+teamrouter.route("/teamDetailsById/:teamId").get(verifyJwt , getTeamDetailsById)
+
+teamrouter.route("/updateDetails/:teamId").patch(verifyJwt , updateTeamDetails);
+
+teamrouter.route("/softDeleteTeam/:teamId").patch(verifyJwt , softDeleteTeam);
+
+teamrouter.route("/activeTeam/:teamId").patch(verifyJwt , makeIsActiveForTeam );
 export {teamrouter};

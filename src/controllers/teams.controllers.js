@@ -57,6 +57,9 @@ const addTeamEmployees = asyncHandler(async (req, res) => {
     if (!team) {
         throw new ApiError(404, "Team not found");
     }
+    if (team.isActive !== true) {
+        throw new ApiError(401, "You cant add the employee team , because it is inActive");
+    }
     const isAdmin = requester.role === "admin";
     const isTeamManager = team.managerId.equals(requester._id);
     if (!isAdmin && !isTeamManager) {
@@ -199,10 +202,10 @@ const getMyTeams = asyncHandler(async (req, res) => {
     }
 
     try {
-      
+
         const managerObjectId = new mongoose.Types.ObjectId(teamManager._id);
 
-       
+
         const page = Math.max(1, parseInt(req.query.page) || 1);
         const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
         const skip = (page - 1) * limit;
@@ -247,7 +250,7 @@ const getMyTeams = asyncHandler(async (req, res) => {
                                 email: 1,
                                 role: 1,
                                 userProfile: 1,
-                                isActive: 1  
+                                isActive: 1
                             }
                         }
                     ]
@@ -278,7 +281,7 @@ const getMyTeams = asyncHandler(async (req, res) => {
                     employees: 1,
                     totalEmployees: 1,
                     activeEmployees: 1,
-                  
+
                 }
             },
             {
@@ -286,18 +289,18 @@ const getMyTeams = asyncHandler(async (req, res) => {
             }
         ];
 
-      
+
         aggregationPipeline.push(
             { $skip: skip },
             { $limit: limit }
         );
 
-      
+
         const [paginatedResult, totalCountResult] = await Promise.all([
             Team.aggregate(aggregationPipeline),
-            Team.countDocuments({ 
-                managerId: managerObjectId, 
-                isActive: true 
+            Team.countDocuments({
+                managerId: managerObjectId,
+                isActive: true
             })
         ]);
 
@@ -339,4 +342,273 @@ const getMyTeams = asyncHandler(async (req, res) => {
         throw new ApiError(500, "Failed to retrieve teams");
     }
 });
-export { createTeam, addTeamEmployees, removeEmployeeFromTeam, getMyTeams };
+
+const getTeamDetailsById = asyncHandler(async (req, res) => {
+    const { teamId } = req.params;
+    const authorizedUser = req.user;
+
+    if (!teamId || !mongoose.Types.ObjectId.isValid(teamId)) {
+        throw new ApiError(403, "Invalid Id format , teamId is required to get the details of team id");
+    }
+    if (!["admin", "manager"].includes(authorizedUser.role)) {
+        throw new ApiError(403, "Unauthorized access: Only managers and admins can access team details");
+    }
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
+    const skip = (page - 1) * limit;
+
+    const result = await Team.aggregate([
+        {
+            $match: {
+                _id: new mongoose.Types.ObjectId(teamId),
+                isActive: true,
+            }
+        },
+        {
+            $lookup: {
+                from: "users",
+                localField: "managerId",
+                foreignField: "_id",
+                as: "managerDetails",
+                pipeline: [
+                    {
+                        $project: {
+                            name: 1,
+                            email: 1,
+                            isActive: 1,
+                            userProfile: 1,
+                            role: 1,
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            $lookup: {
+                from: "users",
+                localField: "employeeIds",
+                foreignField: "_id",
+                as: "employeeDetails",
+                pipeline: [
+                    {
+                        $project: {
+                            name: 1,
+                            email: 1,
+                            isActive: 1,
+                            userProfile: 1,
+                            role: 1
+                        }
+                    },
+                    { $skip: skip },
+                    { $limit: limit }
+                ]
+            }
+        },
+        {
+            $addFields: {
+                manager: { $arrayElemAt: ["$managerDetails", 0] },
+                employees: "$employeeDetails",
+                totalEmployees: { $size: "$employeeIds" }, // Use original IDs
+                activeEmployees: {
+                    $size: {
+                        $filter: {
+                            input: "$employeeIds",
+                            as: "empId",
+                            cond: {
+                                $let: {
+                                    vars: {
+                                        employee: {
+                                            $arrayElemAt: [
+                                                {
+                                                    $filter: {
+                                                        input: "$employeeDetails",
+                                                        as: "ed",
+                                                        cond: { $eq: ["$$ed._id", "$$empId"] }
+                                                    }
+                                                },
+                                                0
+                                            ]
+                                        }
+                                    },
+                                    in: "$$employee.isActive"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        {
+            $project: {
+                teamName: 1,
+                isActive: 1,
+                manager: 1,
+                employees: 1,
+                totalEmployees: 1,
+                activeEmployees: 1,
+            }
+        },
+
+    ])
+
+    if (!result || result.length === 0) {
+        return res.status(404).json(
+            new ApiResponse(404, null, "Team not found or not active")
+        );
+    }
+
+    const team = result[0];
+    const totalEmployees = team.totalEmployees;
+    const totalPages = Math.ceil(totalEmployees / limit);
+    const hasNextPage = page < totalPages;
+    const hasPrevPage = page > 1;
+
+    if (authorizedUser.role === "manager" &&
+        !team.manager._id.equals(authorizedUser._id)) {
+        throw new ApiError(403, "Unauthorized: You don't manage this team");
+    }
+    res.status(200).json(
+        new ApiResponse(200, {
+            team,
+            pagination: {
+                currentPage: page,
+                totalPages,
+                totalEmployees,
+                hasNextPage,
+                hasPrevPage
+            }
+        }, "Team details retrieved successfully")
+    );
+
+})
+
+const updateTeamDetails = asyncHandler(async (req, res) => {
+    const { teamName } = req.body;
+    const { teamId } = req.params;
+    const authorizedUser = req.user;
+
+    if (!teamName && teamName === undefined && teamName === null) {
+        throw new ApiError(401, "Team name is required to update the team details");
+    }
+    if (!teamId || !mongoose.Types.ObjectId.isValid(teamId)) {
+        throw new ApiError(401, "team id is required to update the team details");
+    }
+    if (!["admin", "manager"].includes(authorizedUser.role)) {
+        throw new ApiError(403, "Unauthorized access: Only managers and admins can change team details");
+    }
+    if (authorizedUser.role === "manager" && authorizedUser.isActive === false) {
+        throw new ApiError(401, "Hey manager you are unactive , u are not able to change the team name");
+    }
+    const team = await Team.findById(teamId);
+    if (!team || team.isActive !== true) {
+        throw new ApiError(404, "Team not found , or it is inActive");
+    }
+    const validManager = team.managerId.equals(authorizedUser._id);
+    if (authorizedUser.role === "manager" && !validManager) {
+        throw new ApiError(404, "You don't belongs to this team as a team manager ");
+    }
+
+    const updatedTeam = await Team.findByIdAndUpdate(teamId, {
+        $set: {
+            teamName,
+            isActive: true,
+        }
+    },
+        {
+            new: true,
+            runValidators: true
+        }
+    )
+
+    if (!updatedTeam) {
+        throw new ApiError(404, "failed to update the team details")
+    }
+    res.status(200).json(new ApiResponse(200, updatedTeam, "Team details updated successfully"));
+})
+
+const softDeleteTeam = asyncHandler(async (req, res) => {
+    const { teamId } = req.params;
+    const authorizedUser = req.user;
+
+    if (!teamId || !mongoose.Types.ObjectId.isValid(teamId)) {
+        throw new ApiError(401, "Invalid Team Id format");
+    }
+    if (!["admin", "manager"].includes(authorizedUser.role)) {
+        throw new ApiError(404, "Unauthorized access only admins and managers have access to soft delete the team");
+    }
+    const team = await Team.findById(teamId);
+    if (!team) {
+        throw new ApiError(404, "No team found ");
+    }
+    if (team.isActive === false) {
+        throw new ApiError(401, "The team already soft deleted you can't delete again");
+    }
+    if (authorizedUser.role === "manager" && !team.managerId.equals(authorizedUser._id)) {
+        throw new ApiError(404, "You are not manager for this team , so u can't soft delete the team");
+    }
+
+    const updatedTeam = await Team.findByIdAndUpdate(teamId, {
+        $set: {
+            isActive: false,
+        }
+    },
+        {
+            new: true,
+            runValidators: true,
+        })
+
+    if (!updatedTeam) {
+        throw new ApiError(404, "failed to soft delete the team");
+    }
+
+    res.status(200).json(new ApiResponse(200, updatedTeam, "Successfully soft deleted the team"));
+})
+
+const makeIsActiveForTeam = asyncHandler(async (req, res) => {
+    const { teamId } = req.params;
+    const authorizedUser = req.user;
+
+    if (!teamId || !mongoose.Types.ObjectId.isValid(teamId)) {
+        throw new ApiError(401, "Invalid Team Id format");
+    }
+    if (!["admin", "manager"].includes(authorizedUser.role)) {
+        throw new ApiError(402, "Unauthorized access / only admins and managers have the right");
+    }
+    const team = await Team.findById(teamId);
+    if (!team) {
+        throw new ApiError(404, "No team found");
+    }
+    if (team.isActive === true) {
+        throw new ApiError(403, "The team is already active you can't overwritte it again");
+    }
+    if (authorizedUser.role === "manager" && !team.managerId.equals(authorizedUser._id)) {
+        throw new ApiError(404, "You are not manager for this team , so u can't active the team ");
+    }
+    const updatedTeam = await Team.findByIdAndUpdate(teamId, {
+        $set: {
+            isActive: true,
+        }
+    },
+        {
+            new: true,
+            runValidators: true,
+        }
+    )
+    if (!updatedTeam) {
+        throw new ApiError(404 , "Failed to active the team");
+    }
+
+    res.status(200).json(new ApiResponse(200 , updatedTeam , "Successfully activated the team"));
+})
+
+const getTeamMembers = asyncHandler(async(req , res)=>{
+    // so get the teamId from the params , check it 
+    // only managers and admins can perform this action 
+    // the logic for it is simple , if the admin want to access this then in team members include manager also 
+    // if not means only give the details of the employees and the team name and isActive
+
+    
+})
+
+
+export { createTeam, addTeamEmployees, removeEmployeeFromTeam, getMyTeams, getTeamDetailsById, updateTeamDetails, softDeleteTeam , makeIsActiveForTeam};
