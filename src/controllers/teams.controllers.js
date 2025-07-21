@@ -4,7 +4,11 @@ import { ApiResponse } from "../utils/ApiResponse.js";
 import { User } from "../models/users.model.js";
 import { Team } from "../models/teams.model.js";
 import mongoose from "mongoose";
-import e from "express";
+import { v4 as uuidv4 } from "uuid";
+
+const MAX_BATCH_SIZE = 100;
+const TRANSACTION_TIMEOUT = 30000;
+const MAX_RETRY_ATTEMPTS = 3;
 
 const createTeam = asyncHandler(async (req, res) => {
     const { teamName, managerId } = req.body;
@@ -686,35 +690,57 @@ const getTeamMembers = asyncHandler(async (req, res) => {
 })
 
 const transferEmployee = asyncHandler(async (req, res) => {
-    // only admins and managers can do this , 
-    // get the teamId for which we are trasfering , check it 
-    // get the employee Id from the body , check it ,
-    // in new transfering check whethere is includes or not 
-    // check the new team isActive or not 
-    // check whethere the employee is active or not 
-    // now pull from the old team and addToSet to the new team
-    // Prevent transfers to the same team (fromTeamId === toTeamId)
-    // Reject if employee has "manager" role
-    const { sourceTeamId, destinationTeamId } = req.params;
-    const { employeeIds } = req.body;
-    const authorizedUser = req.user;
-    if (!sourceTeamId || !mongoose.Types.ObjectId.isValid(sourceTeamId)) {
-        throw new ApiError(402, "Invalid source team Id format");
-    }
-
-    if (!destinationTeamId || !mongoose.Types.ObjectId.isValid(destinationTeamId)) {
-        throw new ApiError(402, "Invalid destination team Id format");
-    }
-
-    if (!employeeIds || !Array.isArray(employeeIds) || employeeIds.length === 0) {
-        throw new ApiError(400, "At least one valid employee ID is required to transfer");
-    }
-    if (authorizedUser.role !== "admin") {
-        throw new ApiError(404, "Invalid access only admin can transfer the employees");
-    }
-
+    const { transfers } = req.body;
+    const adminId = req.user._id;
+    const batchId = uuidv4();
+    validateTransferInput(transfers);
+    await validateAdminPermission(adminId);
+    const validationResult = await validateTransfersWithAggregation(transfers);
 
 })
+
+function validateTransferInput(transfers) {
+    if (!Array.isArray(transfers) || transfers.length === 0) {
+        throw new ApiError(400, "Transfer array is required and cannot be empty");
+    }
+    if (transfers.length > MAX_BATCH_SIZE) {
+        throw new ApiError(400, `Batch size cannot exceed ${MAX_BATCH_SIZE} transfers`);
+    }
+    const requiredFields = ['employeeId', 'sourceTeamId', 'destinationTeamId'];
+    transfers.forEach((transfer, index) => {
+        requiredFields.forEach(field => {
+            if (!transfer[field] || !mongoose.isValidObjectId(transfer[field])) {
+                throw new ApiError(400, `Invalid ${field} at index ${index}`);
+            }
+        });
+
+        if (transfer.sourceTeamId === transfer.destinationTeamId) {
+            throw new ApiError(400, `Source and destination teams cannot be same at index ${index}`);
+        }
+    });
+    const employeeIds = transfers.map(t => t.employeeId);
+    const duplicates = employeeIds.filter((id, index) => employeeIds.indexOf(id) !== index);
+    if (duplicates.length > 0) {
+        throw new ApiError(400, `Duplicate employee transfers found: ${duplicates.join(', ')}`);
+    }
+}
+
+async function validateAdminPermission(adminId) {
+    const admin = await User.findById(adminId).select('role').lean();
+
+    if (!admin || admin.role !== "admin") {
+        throw new ApiError(403, "Only administrators can perform employee transfers");
+    }
+}
+
+async function validateTransfersWithAggregation (transfers){
+    const employeeIds = [... new Set(transfers.map(t => new mongoose.Types.ObjectId(t.employeeId)))];
+    const sourceTeamIds = [... new Set(transfers.map(t => new mongoose.Types.ObjectId(t.sourceTeamId)))];
+    const destinationTeamIds = [... new Set(transfers.map(t=> new mongoose.Types.ObjectId(t.destinationTeamId)))];
+    const allTeamIds = [... new Set([...sourceTeamIds , ...destinationTeamIds])];
+
+    
+}
 
 const replaceTeamManager = asyncHandler(async (req, res) => {
     const { teamId } = req.params;
