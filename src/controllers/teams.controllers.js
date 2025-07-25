@@ -4,7 +4,7 @@ import { ApiResponse } from "../utils/ApiResponse.js";
 import { User } from "../models/users.model.js";
 import { Team } from "../models/teams.model.js";
 import mongoose from "mongoose";
-import { v4 as uuidv4 } from "uuid";
+import { NIL, v4 as uuidv4 } from "uuid";
 
 const MAX_BATCH_SIZE = 100;
 const TRANSACTION_TIMEOUT = 30000;
@@ -696,7 +696,13 @@ const transferEmployee = asyncHandler(async (req, res) => {
     validateTransferInput(transfers);
     await validateAdminPermission(adminId);
     const validationResult = await validateTransfersWithAggregation(transfers);
-
+    const result = await executeOptimizedTransferWithRetry(
+        validationResult.transferGroups,
+        adminId,
+        batchId,
+        validationResult.metaData
+    );
+    res.status(200).json(new ApiResponse(200, result, "Employee transfers completed successfully"));
 })
 
 function validateTransferInput(transfers) {
@@ -733,13 +739,286 @@ async function validateAdminPermission(adminId) {
     }
 }
 
-async function validateTransfersWithAggregation (transfers){
+async function validateTransfersWithAggregation(transfers) {
     const employeeIds = [... new Set(transfers.map(t => new mongoose.Types.ObjectId(t.employeeId)))];
     const sourceTeamIds = [... new Set(transfers.map(t => new mongoose.Types.ObjectId(t.sourceTeamId)))];
-    const destinationTeamIds = [... new Set(transfers.map(t=> new mongoose.Types.ObjectId(t.destinationTeamId)))];
-    const allTeamIds = [... new Set([...sourceTeamIds , ...destinationTeamIds])];
+    const destinationTeamIds = [... new Set(transfers.map(t => new mongoose.Types.ObjectId(t.destinationTeamId)))];
+    const allTeamIds = [... new Set([...sourceTeamIds, ...destinationTeamIds])];
 
-    
+    const validationPipeline = [
+        {
+            $match: {
+                _id: { $in: allTeamIds },
+                isActive: true,
+            }
+        },
+        {
+            $addFields: {
+                isSourceTeam: { $in: ["$_id", sourceTeamIds] },
+                isDestinationTeam: { $in: ["$_id", destinationTeamIds] },
+            }
+        },
+        {
+            $lookup: {
+                from: "users",
+                localField: "employeeIds",
+                foreignField: "_id",
+                as: "employees",
+                pipeline: [
+                    {
+                        $match: {
+                            role: "employee",
+                            isActive: true,
+                        }
+                    },
+                    {
+                        $project: {
+                            _id: 1,
+                            name: 1,
+                            email: 1,
+                            userProfile: 1,
+
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            // // abhi hame employees array ko map object me convert karna hai , goal is to convert the employees array into the map object which contains the key, value pairs
+            // employees =[
+            //     { _id: ObjectId("e1"), name: "Alice", email: "alice@example.com" }, yaha pe userprofile bhi ayega 
+            //     { _id: ObjectId("e2"), name: "Bob", email: "bob@example.com" }
+            // ] hame is taraka array milta hai when we do lookup and project the details 
+
+            $addFields: {
+                employeeMap: {
+                    $arrayToObject: {
+                        $map: {
+                            input: "employees",
+                            as: "emp",
+                            in: {
+                                k: { $toString: "$$emp._id" },
+                                v: "$$emp",
+                            }
+                        }
+                    }
+                }
+            },
+            employeeIdStrings: {
+                $map: {
+                    input: "$employeeIds",
+                    as: "id",
+                    in: { $toString: "$$id" },
+                }
+            }
+        },
+
+        {
+            $group: {
+                _id: null,
+                teams: {
+                    $push: {
+                        _id: "$_id",
+                        teamName: "$teamName",
+                        managerId: "$managerId",
+                        employeeIds: "$employeeIds",
+                        employeeIdStrings: "$employeeIdStrings",
+                        employees: "$employees",
+                        employeeMap: "$employeeMap",
+                        isSourceTeam: "$isSourceTeam",
+                        isDestinationTeam: "$isDestinationTeam",
+                    }
+                },
+
+                sourceTeams: {
+                    $push: {
+                        $cond: [
+                            "$isSourceTeam",
+                            {
+                                _id: "$_id",
+                                teamName: "$teamName",
+                                employeeIdStrings: "$employeeIdStrings",
+                                employeeMap: "$employeeMap"
+                            },
+                            null
+                        ]
+                    }
+                },
+
+                destinationTeams: {
+                    $push: {
+                        $cond: [
+                            "$isDestinationTeam",
+                            {
+                                _id: "$_id",
+                                teamName: "$teamName",
+                                employeeIdStrings: "$employeeIdStrings"
+                            },
+                            null
+                        ]
+                    }
+                }
+            }
+        },
+        {
+            $project: {
+                teams: 1,
+                sourceTeams: {
+                    $filter: {
+                        input: "$sourceTeams",
+                        cond: { $ne: ["$$this", null] }
+                    }
+                },
+                destinationTeams: {
+                    $filter: {
+                        input: "$destinationTeams",
+                        cond: {
+                            $ne: ["$$this", null]
+                        }
+                    }
+                }
+            }
+        }
+    ];
+
+    const [validationData] = await Team.aggregate(validationPipeline);
+
+    if (!validationData) {
+        throw new ApiError(404, "No valid teams found");
+    }
+
+    const teamMap = new Map(validationData.teams.map(team => [team._id.toString(), team]));
+    const sourceTeamMap = new Map(validationData.sourceTeams.map(team => [team._id.toString(), team]));
+    const destinationTeamMap = new Map(validationData.destinationTeams.map(team => [team._id.toString(), team]));
+    const missingSourceTeams = sourceTeamIds.filter(id => !sourceTeamMap.has(id.toString()));
+    const missingDestinationTeams = destinationTeamIds.filter(id => !destinationTeamMap.has(id.toString()));
+
+    if (missingSourceTeams.length > 0) {
+        throw new ApiError(404, `Source teams not found or inactive: ${missingSourceTeams.join(', ')}`);
+    }
+    if (missingDestinationTeams.length > 0) {
+        throw new ApiError(404, `Destination teams not found or inactive: ${missingDestinationTeams.join(', ')}`);
+    }
+
+    const validationErrors = [];
+    const validatedTransfers = [];
+
+    transfers.forEach((transfer, index) => {
+        const sourceTeam = sourceTeamMap.get(transfer.sourceTeamId);
+        const destinationTeam = destinationTeamMap.get(transfer.destinationTeamId);
+        const employeeIdStr = transfer.employeeId;
+
+        if (!sourceTeam.employeeIdStrings.includes(employeeIdStr)) {
+            const employeeName = sourceTeam.employeeMap[employeeIdStr]?.name || "Unknown";
+            validationErrors.push(`Employee ${employeeName} (${employeeIdStr}) does not belong to source team ${sourceTeam.teamName}`);
+            return;
+        }
+
+        if (destinationTeam.employeeIdStrings.includes(employeeIdStr)) {
+            const employeeName = destinationTeam.employeeMap[employeeIdStr]?.name || "Unknown";
+            validationErrors.push(`Employee ${employeeName} is already in destination team ${destinationTeam.teamName}`);
+            return;
+        }
+
+        validatedTransfers.push(transfer);
+    });
+
+    if (validationErrors.length > 0) {
+        throw new ApiError(400, `Transfer validation failed:\n${validationErrors.join('\n')}`);
+    }
+
+    const transferGroups = organizeOptimizedTransferGroups(validatedTransfers);
+
+    return {
+        transferGroups,
+        metaData: {
+            teamMap,
+            sourceTeamMap,
+            destinationTeamMap,
+            totalTransfers: validatedTransfers.length,
+        }
+    };
+}
+
+function organizeOptimizedTransferGroups(transfers) {
+    const groups = new Map();
+    transfers.forEach(transfer => {
+        const key = `${transfer.sourceTeamId} - ${transfer.destinationTeamId}`;
+        if (!groups.has(key)) {
+            groups.set(key, {
+                sourceTeamId: new mongoose.Types.ObjectId(transfer.sourceTeamId),
+                destinationTeamId: new mongoose.Types.ObjectId(transfer.destinationTeamId),
+                employeeIds: [],
+            })
+        }
+        groups.get(key).employeeIds.push(new mongoose.Types.ObjectId(transfer.employeeId));
+    });
+
+    return Array.from(groups.values()).sort((a, b) => {
+        const aKey = `${a.sourceTeamId} - ${a.destinationTeamId}`;
+        const bKey = `${b.sourceTeamId} - ${b.destinationTeamId}`;
+        return aKey.localeCompare(bKey);
+    });
+}
+
+async function executeOptimizedTransferWithRetry(transferGroups, adminId, batchId, metadata) {
+    let lastError;
+    for (let attempt = 1; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
+        try {
+            return await executeOptimizedAtomicTransfer(transferGroups, adminId, batchId, metadata)
+        } catch (error) {
+            lastError = error;
+
+            if (error instanceof ApiError || !isTransientError(error)) {
+                throw error;
+            }
+            if (attempt < MAX_RETRY_ATTEMPTS) {
+                await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
+            }
+        }
+    }
+    throw new ApiError(500, `Transfer failed after ${MAX_RETRY_ATTEMPTS} attempts: ${lastError.message}`);
+}
+
+async function executeOptimizedAtomicTransfer(transferGroups, adminId, batchId, metadata) {
+    //     Start MongoDB Session
+    // └── Start Transaction
+    //     ├── Set a timeout (fail-safe)
+    //     ├── Capture pre-transfer team states (for audit logs)
+    //     ├── Execute bulk transfer operations (remove + add employees)
+    //     ├── Verify consistency (no employee is duplicated or missing)
+    //     ├── Create audit logs
+    //     └── Commit Transaction
+    // If any error happens → Abort Transaction
+    // these task need to perform 
+
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+        const timeout = setTimeout(() => {
+            session.abortTransaction();
+            throw new ApiError(408, "Transfer operation timed out");
+        }, TRANSACTION_TIMEOUT);
+
+        const preTransferState = await captureTeamStatesOptimized(transferGroups, session);
+        const transferResults = await executeBulkTransfers(transferGroups, session, metadata);
+        await verifyTransferConsistencyOptimized(transferGroups, session);
+        await createOptimizedAuditTrail(batchId, adminId, transferGroups, preTransferState, session);
+        clearTimeout(timeout);
+        await session.commitTransaction();
+        const totalTransfers = transferGroups.reduce((sum, group) => sum + group.employeeIds.length, 0);
+        const affectedTeams = new Set(transferGroups.flatMap(g => [g.sourceTeamId.toString(), g.destinationTeamId.toString()]));
+        return {
+            
+        }
+    } catch (error) {
+        await session.abortTransaction();
+        throw error;
+    }
+    finally {
+        await session.endSession();
+    }
 }
 
 const replaceTeamManager = asyncHandler(async (req, res) => {
