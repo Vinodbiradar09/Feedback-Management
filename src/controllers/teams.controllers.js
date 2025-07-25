@@ -738,12 +738,11 @@ async function validateAdminPermission(adminId) {
         throw new ApiError(403, "Only administrators can perform employee transfers");
     }
 }
-
 async function validateTransfersWithAggregation(transfers) {
-    const employeeIds = [... new Set(transfers.map(t => new mongoose.Types.ObjectId(t.employeeId)))];
-    const sourceTeamIds = [... new Set(transfers.map(t => new mongoose.Types.ObjectId(t.sourceTeamId)))];
-    const destinationTeamIds = [... new Set(transfers.map(t => new mongoose.Types.ObjectId(t.destinationTeamId)))];
-    const allTeamIds = [... new Set([...sourceTeamIds, ...destinationTeamIds])];
+    const employeeIds = [...new Set(transfers.map(t => new mongoose.Types.ObjectId(t.employeeId)))];
+    const sourceTeamIds = [...new Set(transfers.map(t => new mongoose.Types.ObjectId(t.sourceTeamId)))];
+    const destinationTeamIds = [...new Set(transfers.map(t => new mongoose.Types.ObjectId(t.destinationTeamId)))];
+    const allTeamIds = [...new Set([...sourceTeamIds, ...destinationTeamIds])];
 
     const validationPipeline = [
         {
@@ -777,24 +776,17 @@ async function validateTransfersWithAggregation(transfers) {
                             name: 1,
                             email: 1,
                             userProfile: 1,
-
                         }
                     }
                 ]
             }
         },
         {
-            // // abhi hame employees array ko map object me convert karna hai , goal is to convert the employees array into the map object which contains the key, value pairs
-            // employees =[
-            //     { _id: ObjectId("e1"), name: "Alice", email: "alice@example.com" }, yaha pe userprofile bhi ayega 
-            //     { _id: ObjectId("e2"), name: "Bob", email: "bob@example.com" }
-            // ] hame is taraka array milta hai when we do lookup and project the details 
-
             $addFields: {
                 employeeMap: {
                     $arrayToObject: {
                         $map: {
-                            input: "employees",
+                            input: "$employees",  // Fixed: added $ prefix
                             as: "emp",
                             in: {
                                 k: { $toString: "$$emp._id" },
@@ -802,17 +794,16 @@ async function validateTransfersWithAggregation(transfers) {
                             }
                         }
                     }
-                }
-            },
-            employeeIdStrings: {
-                $map: {
-                    input: "$employeeIds",
-                    as: "id",
-                    in: { $toString: "$$id" },
+                },
+                employeeIdStrings: {  // Fixed: moved inside the same $addFields
+                    $map: {
+                        input: "$employeeIds",
+                        as: "id",
+                        in: { $toString: "$$id" },
+                    }
                 }
             }
         },
-
         {
             $group: {
                 _id: null,
@@ -829,7 +820,6 @@ async function validateTransfersWithAggregation(transfers) {
                         isDestinationTeam: "$isDestinationTeam",
                     }
                 },
-
                 sourceTeams: {
                     $push: {
                         $cond: [
@@ -838,13 +828,12 @@ async function validateTransfersWithAggregation(transfers) {
                                 _id: "$_id",
                                 teamName: "$teamName",
                                 employeeIdStrings: "$employeeIdStrings",
-                                employeeMap: "$employeeMap"
+                                employeeMap: "$employeeMap"  // Added for destination validation
                             },
                             null
                         ]
                     }
                 },
-
                 destinationTeams: {
                     $push: {
                         $cond: [
@@ -852,7 +841,8 @@ async function validateTransfersWithAggregation(transfers) {
                             {
                                 _id: "$_id",
                                 teamName: "$teamName",
-                                employeeIdStrings: "$employeeIdStrings"
+                                employeeIdStrings: "$employeeIdStrings",
+                                employeeMap: "$employeeMap"  // Added for consistency
                             },
                             null
                         ]
@@ -872,9 +862,7 @@ async function validateTransfersWithAggregation(transfers) {
                 destinationTeams: {
                     $filter: {
                         input: "$destinationTeams",
-                        cond: {
-                            $ne: ["$$this", null]
-                        }
+                        cond: { $ne: ["$$this", null] }
                     }
                 }
             }
@@ -890,6 +878,7 @@ async function validateTransfersWithAggregation(transfers) {
     const teamMap = new Map(validationData.teams.map(team => [team._id.toString(), team]));
     const sourceTeamMap = new Map(validationData.sourceTeams.map(team => [team._id.toString(), team]));
     const destinationTeamMap = new Map(validationData.destinationTeams.map(team => [team._id.toString(), team]));
+    
     const missingSourceTeams = sourceTeamIds.filter(id => !sourceTeamMap.has(id.toString()));
     const missingDestinationTeams = destinationTeamIds.filter(id => !destinationTeamMap.has(id.toString()));
 
@@ -903,19 +892,30 @@ async function validateTransfersWithAggregation(transfers) {
     const validationErrors = [];
     const validatedTransfers = [];
 
-    transfers.forEach((transfer, index) => {
+    transfers.forEach((transfer) => {
         const sourceTeam = sourceTeamMap.get(transfer.sourceTeamId);
         const destinationTeam = destinationTeamMap.get(transfer.destinationTeamId);
         const employeeIdStr = transfer.employeeId;
 
+        // Check if employee exists in source team
         if (!sourceTeam.employeeIdStrings.includes(employeeIdStr)) {
-            const employeeName = sourceTeam.employeeMap[employeeIdStr]?.name || "Unknown";
+            const employeeName = sourceTeam.employeeMap?.[employeeIdStr]?.name || "Unknown";
             validationErrors.push(`Employee ${employeeName} (${employeeIdStr}) does not belong to source team ${sourceTeam.teamName}`);
             return;
         }
 
+        // Check if employee is active in source team
+        if (!sourceTeam.employeeMap?.[employeeIdStr]) {
+            validationErrors.push(`Employee (${employeeIdStr}) is in source team ${sourceTeam.teamName} but is inactive`);
+            return;
+        }
+
+        // Check if employee is already in destination team
         if (destinationTeam.employeeIdStrings.includes(employeeIdStr)) {
-            const employeeName = destinationTeam.employeeMap[employeeIdStr]?.name || "Unknown";
+            // Get name from destination if available, otherwise from source
+            const employeeName = destinationTeam.employeeMap?.[employeeIdStr]?.name || 
+                                sourceTeam.employeeMap?.[employeeIdStr]?.name || 
+                                "Unknown";
             validationErrors.push(`Employee ${employeeName} is already in destination team ${destinationTeam.teamName}`);
             return;
         }
@@ -931,7 +931,7 @@ async function validateTransfersWithAggregation(transfers) {
 
     return {
         transferGroups,
-        metaData: {
+        metadata: {  // Fixed property name (was metaData)
             teamMap,
             sourceTeamMap,
             destinationTeamMap,
@@ -942,56 +942,52 @@ async function validateTransfersWithAggregation(transfers) {
 
 function organizeOptimizedTransferGroups(transfers) {
     const groups = new Map();
+
     transfers.forEach(transfer => {
-        const key = `${transfer.sourceTeamId} - ${transfer.destinationTeamId}`;
+        const key = `${transfer.sourceTeamId}-${transfer.destinationTeamId}`;
+        
         if (!groups.has(key)) {
             groups.set(key, {
                 sourceTeamId: new mongoose.Types.ObjectId(transfer.sourceTeamId),
                 destinationTeamId: new mongoose.Types.ObjectId(transfer.destinationTeamId),
-                employeeIds: [],
-            })
+                employeeIds: []
+            });
         }
+        
         groups.get(key).employeeIds.push(new mongoose.Types.ObjectId(transfer.employeeId));
     });
 
+    // Sort groups by team IDs to prevent deadlocks (consistent ordering)
     return Array.from(groups.values()).sort((a, b) => {
-        const aKey = `${a.sourceTeamId} - ${a.destinationTeamId}`;
-        const bKey = `${b.sourceTeamId} - ${b.destinationTeamId}`;
+        const aKey = `${a.sourceTeamId}-${a.destinationTeamId}`;
+        const bKey = `${b.sourceTeamId}-${b.destinationTeamId}`;
         return aKey.localeCompare(bKey);
     });
 }
 
 async function executeOptimizedTransferWithRetry(transferGroups, adminId, batchId, metadata) {
     let lastError;
+    
     for (let attempt = 1; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
         try {
-            return await executeOptimizedAtomicTransfer(transferGroups, adminId, batchId, metadata)
+            return await executeOptimizedAtomicTransfer(transferGroups, adminId, batchId, metadata);
         } catch (error) {
             lastError = error;
-
+            
             if (error instanceof ApiError || !isTransientError(error)) {
                 throw error;
             }
+            
             if (attempt < MAX_RETRY_ATTEMPTS) {
                 await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
             }
         }
     }
+    
     throw new ApiError(500, `Transfer failed after ${MAX_RETRY_ATTEMPTS} attempts: ${lastError.message}`);
 }
 
 async function executeOptimizedAtomicTransfer(transferGroups, adminId, batchId, metadata) {
-    //     Start MongoDB Session
-    // └── Start Transaction
-    //     ├── Set a timeout (fail-safe)
-    //     ├── Capture pre-transfer team states (for audit logs)
-    //     ├── Execute bulk transfer operations (remove + add employees)
-    //     ├── Verify consistency (no employee is duplicated or missing)
-    //     ├── Create audit logs
-    //     └── Commit Transaction
-    // If any error happens → Abort Transaction
-    // these task need to perform 
-
     const session = await mongoose.startSession();
     session.startTransaction();
 
@@ -1001,24 +997,259 @@ async function executeOptimizedAtomicTransfer(transferGroups, adminId, batchId, 
             throw new ApiError(408, "Transfer operation timed out");
         }, TRANSACTION_TIMEOUT);
 
+       
         const preTransferState = await captureTeamStatesOptimized(transferGroups, session);
+
+    
         const transferResults = await executeBulkTransfers(transferGroups, session, metadata);
+
+        
         await verifyTransferConsistencyOptimized(transferGroups, session);
+
+       
         await createOptimizedAuditTrail(batchId, adminId, transferGroups, preTransferState, session);
+
         clearTimeout(timeout);
         await session.commitTransaction();
+
         const totalTransfers = transferGroups.reduce((sum, group) => sum + group.employeeIds.length, 0);
         const affectedTeams = new Set(transferGroups.flatMap(g => [g.sourceTeamId.toString(), g.destinationTeamId.toString()]));
+        
         return {
-            
-        }
+            batchId,
+            totalTransfers,
+            transferGroups: transferResults,
+            affectedTeamsCount: affectedTeams.size,
+            completedAt: new Date().toISOString(),
+            performanceMetrics: {
+                transferGroupsProcessed: transferGroups.length,
+                bulkOperationsExecuted: transferGroups.length * 2 
+            }
+        };
+
     } catch (error) {
         await session.abortTransaction();
         throw error;
-    }
-    finally {
+    } finally {
         await session.endSession();
     }
+}
+
+
+async function executeBulkTransfers(transferGroups, session, metadata) {
+    const bulkRemoveOps = [];
+    const bulkAddOps = [];
+    const transferResults = [];
+
+    // Prepare bulk operations
+    transferGroups.forEach(group => {
+        const { sourceTeamId, destinationTeamId, employeeIds } = group;
+        const sourceTeam = metadata.teamMap.get(sourceTeamId.toString());
+        const destinationTeam = metadata.teamMap.get(destinationTeamId.toString());
+
+        // Bulk remove operation
+        bulkRemoveOps.push({
+            updateOne: {
+                filter: { 
+                    _id: sourceTeamId,
+                    employeeIds: { $in: employeeIds }
+                },
+                update: { 
+                    $pull: { employeeIds: { $in: employeeIds } },
+                    $set: { updatedAt: new Date() }
+                }
+            }
+        });
+
+        // Bulk add operation
+        bulkAddOps.push({
+            updateOne: {
+                filter: { _id: destinationTeamId },
+                update: { 
+                    $addToSet: { employeeIds: { $each: employeeIds } },
+                    $set: { updatedAt: new Date() }
+                }
+            }
+        });
+
+        transferResults.push({
+            sourceTeam: { id: sourceTeamId, name: sourceTeam.teamName },
+            destinationTeam: { id: destinationTeamId, name: destinationTeam.teamName },
+            employeesTransferred: employeeIds.length,
+            employeeIds
+        });
+    });
+
+    // Execute bulk operations in parallel for maximum performance
+    const [removeResults, addResults] = await Promise.all([
+        Team.bulkWrite(bulkRemoveOps, { session, ordered: false }),
+        Team.bulkWrite(bulkAddOps, { session, ordered: false })
+    ]);
+
+    // Verify all operations succeeded
+    if (removeResults.modifiedCount !== transferGroups.length) {
+        throw new ApiError(500, `Bulk remove operation failed. Expected: ${transferGroups.length}, Modified: ${removeResults.modifiedCount}`);
+    }
+
+    if (addResults.modifiedCount !== transferGroups.length) {
+        throw new ApiError(500, `Bulk add operation failed. Expected: ${transferGroups.length}, Modified: ${addResults.modifiedCount}`);
+    }
+
+    return transferResults;
+}
+
+async function captureTeamStatesOptimized(transferGroups, session) {
+    const teamIds = [...new Set(transferGroups.flatMap(g => [g.sourceTeamId, g.destinationTeamId]))];
+    
+    const [stateData] = await Team.aggregate([
+        {
+            $match: { _id: { $in: teamIds } }
+        },
+        {
+            $project: {
+                _id: 1,
+                teamName: 1,
+                employeeIds: 1,
+                employeeCount: { $size: "$employeeIds" }
+            }
+        },
+        {
+            $group: {
+                _id: null,
+                teams: {
+                    $push: {
+                        k: { $toString: "$_id" },
+                        v: {
+                            teamName: "$teamName",
+                            employeeCount: "$employeeCount",
+                            employeeIds: {
+                                $map: {
+                                    input: "$employeeIds",
+                                    as: "id",
+                                    in: { $toString: "$$id" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        {
+            $project: {
+                _id: 0,
+                teamStates: { $arrayToObject: "$teams" }
+            }
+        }
+    ], { session });
+
+    return stateData?.teamStates || {};
+}
+
+
+async function verifyTransferConsistencyOptimized(transferGroups, session) {
+    const teamIds = [...new Set(transferGroups.flatMap(g => [g.sourceTeamId, g.destinationTeamId]))];
+    
+    // Single aggregation to verify consistency
+    const [consistencyCheck] = await Team.aggregate([
+        {
+            $match: { _id: { $in: teamIds } }
+        },
+        {
+            $unwind: "$employeeIds"
+        },
+        {
+            $group: {
+                _id: "$employeeIds",
+                teamCount: { $sum: 1 },
+                teams: { $push: "$_id" }
+            }
+        },
+        {
+            $match: {
+                teamCount: { $gt: 1 }
+            }
+        },
+        {
+            $project: {
+                employeeId: "$_id",
+                duplicateTeams: "$teams",
+                _id: 0
+            }
+        }
+    ], { session });
+
+    if (consistencyCheck && consistencyCheck.length > 0) {
+        throw new ApiError(500, `Data consistency error: Employee ${consistencyCheck[0].employeeId} found in multiple teams`);
+    }
+
+    // Verify specific transfers completed
+    const verificationPipeline = await Promise.all(
+        transferGroups.map(async group => {
+            const [sourceCheck, destCheck] = await Promise.all([
+                Team.findOne(
+                    { _id: group.sourceTeamId, employeeIds: { $in: group.employeeIds } },
+                    { _id: 1 }
+                ).session(session).lean(),
+                Team.findOne(
+                    { _id: group.destinationTeamId, employeeIds: { $all: group.employeeIds } },
+                    { _id: 1 }
+                ).session(session).lean()
+            ]);
+
+            if (sourceCheck) {
+                throw new ApiError(500, `Transfer verification failed: Some employees still in source team ${group.sourceTeamId}`);
+            }
+            if (!destCheck) {
+                throw new ApiError(500, `Transfer verification failed: Some employees not found in destination team ${group.destinationTeamId}`);
+            }
+        })
+    );
+}
+
+async function createOptimizedAuditTrail(batchId, adminId, transferGroups, preTransferState, session) {
+    const auditRecords = transferGroups.map(group => ({
+        batchId,
+        adminId,
+        operationType: 'BATCH_EMPLOYEE_TRANSFER',
+        sourceTeamId: group.sourceTeamId,
+        destinationTeamId: group.destinationTeamId,
+        employeeIds: group.employeeIds,
+        employeeCount: group.employeeIds.length,
+        reason: 'Employee transfer by administrator',
+        preTransferState: {
+            sourceTeam: preTransferState[group.sourceTeamId.toString()],
+            destinationTeam: preTransferState[group.destinationTeamId.toString()]
+        },
+        executedAt: new Date(),
+        createdAt: new Date(),
+        updatedAt: new Date()
+    }));
+    console.log('Optimized Transfer Audit Trail:', {
+        batchId,
+        totalRecords: auditRecords.length,
+        summary: auditRecords.map(r => ({
+            sourceTeam: r.sourceTeamId,
+            destinationTeam: r.destinationTeamId,
+            employeeCount: r.employeeCount
+        }))
+    });
+}
+
+function isTransientError(error) {
+    const transientErrorCodes = [
+        'ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED',
+        11600, 11602, 13436, 13435, 189, 91, 7, 6, 89
+    ];
+    
+    return transientErrorCodes.includes(error.code) || 
+           error.name === 'MongoTimeoutError' ||
+           error.name === 'MongoNetworkError' ||
+           error.name === 'MongoServerError' ||
+           (error.message && (
+               error.message.includes('transaction') ||
+               error.message.includes('timeout') ||
+               error.message.includes('connection')
+           ));
 }
 
 const replaceTeamManager = asyncHandler(async (req, res) => {

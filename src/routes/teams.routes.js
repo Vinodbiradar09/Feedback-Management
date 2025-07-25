@@ -25,4 +25,6 @@ teamrouter.route("/teamMembers/:teamId").get(verifyJwt , getTeamMembers);
 teamrouter.route("/getEmployeeTeam/:employeeId").get(verifyJwt , getEmployeeTeam);
 
 teamrouter.route("/replaceManager/:teamId").patch(verifyJwt , replaceTeamManager);
+
+teamrouter.route("/transferEmployee").patch(verifyJwt , transferEmployee);
 export {teamrouter};
