@@ -1,5 +1,5 @@
 import mongoose, { Schema, model } from "mongoose";
-
+import mongooseAggregatePaginate from "mongoose-aggregate-paginate-v2";
 const feedbackSchema = new Schema(
     {
         fromManagerId: {
@@ -53,7 +53,7 @@ const feedbackSchema = new Schema(
     { timestamps: true }
 
 )
-
+feedbackSchema.plugin(mongooseAggregatePaginate);
 feedbackSchema.pre("save", function (next) {
     if (this.isModified() && !this.isNew) {
         this.version += 1;

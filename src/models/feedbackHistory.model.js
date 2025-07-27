@@ -25,7 +25,7 @@ const feedbackHistorySchema = new Schema(
         editedAt: {
             type: Date,
             default: Date.now
-        }
+        },
     },
     { timestamps: true }
 
