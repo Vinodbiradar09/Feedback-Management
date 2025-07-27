@@ -6,7 +6,46 @@ import { Team } from "../models/teams.model.js";
 import { Feedback } from "../models/feedback.model.js";
 import { Feedbackhistory } from "../models/feedbackHistory.model.js";
 import mongoose, { version } from "mongoose";
-import { text } from "express";
+import PDFDocument from "pdfkit";
+import getStream from 'get-stream';
+import { generateEmployeeFeedbackPDF} from "../utils/generatePdf.js";
+import { getEmailTransporter , testEmailConfiguration } from "../utils/sendEmail.js";
+
+const exportRateLimit = new Map();
+const RATE_LIMIT_WINDOW = 60 * 60 * 1000; // 1 hour
+const MAX_EXPORTS_PER_HOUR = 5;
+
+const checkRateLimit = (userId) => {
+    try {
+        if (!userId) {
+            console.error('checkRateLimit called without userId');
+            return false;
+        }
+
+        const now = Date.now();
+        const userKey = userId.toString();
+
+        if (!exportRateLimit.has(userKey)) {
+            exportRateLimit.set(userKey, { count: 1, resetTime: now + RATE_LIMIT_WINDOW });
+            return true;
+        }
+
+        const userLimit = exportRateLimit.get(userKey);
+        if (now > userLimit.resetTime) {
+            exportRateLimit.set(userKey, { count: 1, resetTime: now + RATE_LIMIT_WINDOW });
+            return true;
+        }
+        if (userLimit.count >= MAX_EXPORTS_PER_HOUR) {
+            return false;
+        }
+        userLimit.count += 1;
+        return true;
+
+    } catch (error) {
+        console.error('Error in checkRateLimit:', error);
+        return false; 
+    }
+};
 
 const createFeedback = asyncHandler(async (req, res) => {
     const { employeeId } = req.params;
@@ -578,33 +617,33 @@ const getManagerFeedback = asyncHandler(async (req, res) => {
                     $limit: limitNum
                 },
                 {
-                    $lookup : {
-                        from : "users",
-                        localField : "toEmployeeId",
-                        foreignField : "_id",
-                        as : "employeeInfo",
-                        pipeline : [
+                    $lookup: {
+                        from: "users",
+                        localField: "toEmployeeId",
+                        foreignField: "_id",
+                        as: "employeeInfo",
+                        pipeline: [
                             {
-                                $project : {
-                                    name : 1,
-                                    email : 1,
-                                    isActive : 1,
-                                    userProfile : 1,
+                                $project: {
+                                    name: 1,
+                                    email: 1,
+                                    isActive: 1,
+                                    userProfile: 1,
                                 }
                             }
                         ]
                     }
                 },
                 {
-                    $addFields : {
-                        employee : {
-                            $arrayElemAt : ["$employeeInfo" , 0]
+                    $addFields: {
+                        employee: {
+                            $arrayElemAt: ["$employeeInfo", 0]
                         }
                     }
                 },
                 {
-                    $project : {
-                        employee : 1,
+                    $project: {
+                        employee: 1,
                         strengths: 1,
                         areasToImprove: 1,
                         sentiment: 1,
@@ -616,7 +655,7 @@ const getManagerFeedback = asyncHandler(async (req, res) => {
                     }
                 }
             ]),
-               Feedback.countDocuments(matchConditions)
+            Feedback.countDocuments(matchConditions)
         ])
         const totalPages = Math.ceil(totalCount / limitNum);
         const hasNextPage = pageNum < totalPages;
@@ -632,28 +671,349 @@ const getManagerFeedback = asyncHandler(async (req, res) => {
             nextPage: hasNextPage ? pageNum + 1 : null,
             prevPage: hasPrevPage ? pageNum - 1 : null
         };
-        if(!feedbackResult || feedbackResult.length === 0){
-            return res.status(200).json(new ApiResponse(200 , 
+        if (!feedbackResult || feedbackResult.length === 0) {
+            return res.status(200).json(new ApiResponse(200,
                 {
-                    feedback : [],
-                    pagination : paginationMeta,
+                    feedback: [],
+                    pagination: paginationMeta,
                     filters: { sentiment, sortBy: sortField, sortOrder: sortDirection }
                 },
-                 "No feedback found"
+                "No feedback found"
             ))
         }
 
-        res.status(200).json(new ApiResponse(200 , {
-            feedback : feedbackResult,
-            pagination : paginationMeta,
+        res.status(200).json(new ApiResponse(200, {
+            feedback: feedbackResult,
+            pagination: paginationMeta,
             filters: { sentiment, sortBy: sortField, sortOrder: sortDirection }
         },
-        `Successfully retrieved ${feedbackResult.length} feedback record(s)`
-    ))
+            `Successfully retrieved ${feedbackResult.length} feedback record(s)`
+        ))
     } catch (error) {
         console.error('Error fetching employee feedback:', error);
         throw new ApiError(500, "Failed to retrieve feedback. Please try again later.");
     }
 });
 
-export { createFeedback, getFeedbackById, updateFeedback, softDeleteFeedback, makeIsDeletedFalse, acknowledgeFeedback, getEmployeeFeedback , getManagerFeedback }; 
+const bulkCreateFeedback = asyncHandler(async (req, res) => {
+    const manager = req.user
+    const { feedbacks } = req.body;
+    if (manager.role !== "manager") {
+        throw new ApiError(403, "Only managers can create feedback");
+    }
+    if (!feedbacks || !Array.isArray(feedbacks) || feedbacks.length === 0) {
+        throw new ApiError(400, "Feedbacks array is required and must not be empty");
+    }
+    const MAX_BATCH_SIZE = 100;
+    if (feedbacks.length > MAX_BATCH_SIZE) {
+        throw new ApiError(400, `Cannot create more than ${MAX_BATCH_SIZE} feedbacks at once`);
+    }
+    const validatedFeedbacks = [];
+    const validationErrors = [];
+    const employeeIds = new Set();
+
+    for (let i = 0; i < feedbacks.length; i++) {
+        const feedback = feedbacks[i];
+        const errors = [];
+
+        if (!feedback.toEmployeeId || !mongoose.isValidObjectId(feedback.toEmployeeId)) {
+            errors.push(`Invalid employee ID at index ${i}`);
+        } else {
+            employeeIds.add(feedback.toEmployeeId.toString());
+        }
+
+        if (!feedback.strengths || typeof feedback.strengths !== "string" || feedback.strengths.trim().length === 0) {
+            errors.push(`Strengths is required and must be a non-empty string at index ${i}`);
+        } else if (feedback.strengths.trim().length > 1000) {
+            errors.push(`Strengths cannot exceed 1000 characters at index ${i}`);
+        }
+
+        if (!feedback.areasToImprove || typeof feedback.areasToImprove !== "string" || feedback.areasToImprove.trim().length === 0) {
+            errors.push(`Areas to improve is required and must be a non-empty string at index ${i}`);
+        } else if (feedback.areasToImprove.trim().length > 1000) {
+            errors.push(`Areas to improve cannot exceed 1000 characters at index ${i}`);
+        }
+
+        if (!feedback.sentiment || !["positive", "neutral", "negative"].includes(feedback.sentiment)) {
+            errors.push(`Sentiment must be positive, neutral, or negative at index ${i}`);
+        }
+
+        if (errors.length > 0) {
+            validationErrors.push(...errors);
+        } else {
+            validatedFeedbacks.push({
+                fromManagerId: manager._id,
+                toEmployeeId: new mongoose.Types.ObjectId(feedback.toEmployeeId),
+                strengths: feedback.strengths,
+                areasToImprove: feedback.areasToImprove,
+                sentiment: feedback.sentiment,
+                isAcknowledged: false,
+                acknowledgedAt: null,
+                version: 1,
+                isDeleted: false
+            })
+        }
+    }
+
+    if (validationErrors.length > 0) {
+        throw new ApiError(400, `Validation errors: ${validationErrors.join(', ')}`);
+    }
+    if (employeeIds.size !== feedbacks.length) {
+        throw new ApiError(400, "Duplicate employee IDs found in the batch");
+    }
+    const session = await mongoose.startSession();
+    try {
+        const result = await session.withTransaction(async () => {
+            const employees = await User.find({
+                _id: { $in: Array.from(employeeIds).map(id => new mongoose.Types.ObjectId(id)) },
+                role: "employee",
+                isActive: true
+            }).select("_id name email userProfile").session(session);
+
+            if (employees.length !== employeeIds.size) {
+                const foundEmployeeIds = new Set(employees.map(emp => emp._id.toString()));
+                const missingIds = Array.from(employeeIds).filter(id => !foundEmployeeIds.has(id));
+                throw new ApiError(400, `Invalid or inactive employee IDs: ${missingIds.join(', ')}`);
+            }
+
+            const teamCheck = await Team.findOne({
+                managerId: manager._id,
+                employeeIds: { $all: Array.from(employeeIds).map(id => new mongoose.Types.ObjectId(id)) },
+                isActive: true,
+
+            }).session(session);
+            if (!teamCheck) {
+                throw new ApiError(403, "You don't have permission to give feedback to one or more of these employees");
+            }
+
+            const existingFeedback = await Feedback.find({
+                fromManagerId: manager._id,
+                toEmployeeId: { $in: Array.from(employeeIds).map(id => new mongoose.Types.ObjectId(id)) },
+                isDeleted: false,
+                createdAt: {
+                    $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) // Last 24 hours
+                }
+            }).select('toEmployeeId').session(session)
+            if (existingFeedback.length > 0) {
+                const recentEmployeeIds = existingFeedback.map(f => f.toEmployeeId.toString());
+                throw new ApiError(409, `Feedback already exists for employees in the last 24 hours: ${recentEmployeeIds.join(', ')}`);
+            }
+
+            const createdFeedbacks = await Feedback.insertMany(validatedFeedbacks,
+                {
+                    session,
+                    ordered: false
+                });
+
+            return {
+                createdFeedbacks,
+                employees: employees.reduce((acc, emp) => {
+                    acc[emp._id.toString()] = { name: emp.name, email: emp.email };
+                    return acc;
+                }, {})
+            };
+        });
+
+        const responseData = {
+            success: true,
+            totalCreated: result.createdFeedbacks.length,
+            feedbacks: result.createdFeedbacks.map(feedback => ({
+                _id: feedback._id,
+                employee: result.employees[feedback.toEmployeeId.toString()],
+                strengths: feedback.strengths,
+                areasToImprove: feedback.areasToImprove,
+                sentiment: feedback.sentiment,
+                createdAt: feedback.createdAt
+            }))
+
+        };
+        res.status(201).json(
+            new ApiResponse(201, responseData, `Successfully created ${result.createdFeedbacks.length} feedback records`)
+        );
+    } catch (error) {
+        if (error instanceof ApiError) {
+            throw error;
+        }
+        if (error.code === 11000) {
+            throw new ApiError(409, "Duplicate feedback entry detected");
+        }
+
+        console.error('Bulk feedback creation error:', error);
+        throw new ApiError(500, "Failed to create feedback records");
+    } finally {
+        await session.endSession();
+    }
+});
+
+const exportEmployeeFeedback = asyncHandler(async (req, res) => {
+    const MAX_EXPORTS_PER_HOUR = 5;
+    const employee = req.user;
+    const { includeManagerDetails = false, dateRange } = req.query;
+    if (employee.role !== 'employee') {
+        throw new ApiError(403, 'Only employees can export their feedback');
+    }
+    if (!checkRateLimit(employee._id)) {
+        throw new ApiError(429, `Rate limit exceeded. You can only export ${MAX_EXPORTS_PER_HOUR} reports per hour`);
+    }
+    const query = {
+        toEmployeeId: employee._id,
+        isAcknowledged: true,
+        isDeleted: false,
+    };
+
+    if (dateRange) {
+        const { startDate, endDate } = dateRange;
+        if (startDate || endDate) {
+            query.acknowledgedAt = {};
+            if (startDate) query.acknowledgedAt.$gte = new Date(startDate);
+            if (endDate) query.acknowledgedAt.$lte = new Date(endDate);
+        }
+    }
+
+    try {
+      
+        let feedbackQuery = Feedback.find(query)
+            .select('strengths areasToImprove sentiment fromManagerId acknowledgedAt createdAt')
+            .sort({ acknowledgedAt: -1 })
+            .lean();
+
+      
+        if (includeManagerDetails === 'true' || includeManagerDetails === true) {
+            feedbackQuery = feedbackQuery.populate({
+                path: 'fromManagerId',
+                select: 'name email',
+                options: { lean: true }
+            });
+        }
+
+        console.log('Executing feedback query for user:', employee._id);
+        const feedbacks = await feedbackQuery;
+
+        if (!feedbacks || feedbacks.length === 0) {
+            throw new ApiError(404, 'No acknowledged feedback records found to export');
+        }
+
+        console.log(`Found ${feedbacks.length} feedback records`);
+
+      
+        const MAX_FEEDBACK_RECORDS = 100;
+        const limitedFeedbacks = feedbacks.slice(0, MAX_FEEDBACK_RECORDS);
+
+        if (feedbacks.length > MAX_FEEDBACK_RECORDS) {
+            console.warn(`User ${employee._id} attempted to export ${feedbacks.length} records, limited to ${MAX_FEEDBACK_RECORDS}`);
+        }
+        console.log('Generating PDF and setting up email transporter...');
+        
+        let pdfBuffer;
+        let transporter;
+        
+        try {
+           
+            pdfBuffer = await generateEmployeeFeedbackPDF(limitedFeedbacks, employee.name, employee.email);
+            console.log('PDF generated successfully, buffer size:', pdfBuffer?.length);
+        } catch (pdfError) {
+            console.error('PDF generation error:', pdfError);
+            throw new ApiError(500, 'Failed to generate PDF report');
+        }
+
+        try {
+          
+            transporter = getEmailTransporter();
+            console.log('Email transporter obtained');
+        } catch (emailError) {
+            console.error('Email transporter error:', emailError);
+            throw new ApiError(500, 'Failed to initialize email service');
+        }
+        const emailOptions = {
+            from: `"Feedback System" <${process.env.SMTP_EMAIL}>`,
+            to: employee.email,
+            subject: `Your Feedback Report - ${new Date().toLocaleDateString()}`,
+            html: `
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                    <h2 style="color: #2c3e50;">Your Feedback Report</h2>
+                    <p>Dear ${employee.name || 'Employee'},</p>
+                    <p>Please find your comprehensive feedback report attached as a PDF document.</p>
+                    <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
+                        <h3 style="margin: 0; color: #495057;">Report Summary:</h3>
+                        <ul style="margin: 10px 0;">
+                            <li>Total Feedback Records: <strong>${limitedFeedbacks.length}</strong></li>
+                            <li>Date Range: <strong>${limitedFeedbacks.length > 0 ? new Date(limitedFeedbacks[limitedFeedbacks.length - 1].acknowledgedAt).toLocaleDateString() + ' - ' + new Date(limitedFeedbacks[0].acknowledgedAt).toLocaleDateString() : 'N/A'}</strong></li>
+                            <li>Generated: <strong>${new Date().toLocaleString()}</strong></li>
+                        </ul>
+                    </div>
+                    <p style="color: #6c757d; font-size: 12px;">
+                        This report is confidential and intended only for the recipient. 
+                        Please contact HR if you have any questions about your feedback.
+                    </p>
+                </div>
+            `,
+            attachments: [
+                {
+                    filename: `feedback_report_${(employee.name || 'employee').replace(/\s+/g, '_')}_${new Date().toISOString().split('T')[0]}.pdf`,
+                    content: pdfBuffer,
+                    contentType: 'application/pdf'
+                }
+            ]
+        };
+        let emailSent = false;
+        let retryCount = 0;
+        const maxRetries = 3;
+
+        while (!emailSent && retryCount < maxRetries) {
+            try {
+                console.log(`Sending email attempt ${retryCount + 1}...`);
+                await transporter.sendMail(emailOptions);
+                emailSent = true;
+                console.log('Email sent successfully');
+            } catch (emailError) {
+                retryCount++;
+                console.error(`Email send attempt ${retryCount} failed:`, {
+                    error: emailError.message,
+                    code: emailError.code,
+                    command: emailError.command
+                });
+                
+                if (retryCount >= maxRetries) {
+                    throw new ApiError(500, 'Failed to send email after multiple attempts. Please try again later.');
+                }
+                const delay = Math.pow(2, retryCount) * 1000;
+                console.log(`Waiting ${delay}ms before retry...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+        const userRateLimit = exportRateLimit.get(employee._id.toString());
+        const remainingExports = Math.max(0, MAX_EXPORTS_PER_HOUR - (userRateLimit?.count || 0));
+        res.status(200).json(
+            new ApiResponse(200, {
+                success: true,
+                recordsExported: limitedFeedbacks.length,
+                totalRecords: feedbacks.length,
+                emailSent: employee.email,
+                generatedAt: new Date().toISOString(),
+                remainingExports: remainingExports
+            }, `PDF report with ${limitedFeedbacks.length} feedback records has been successfully sent to ${employee.email}`)
+        );
+
+    } catch (error) {
+        console.error('Export feedback error:', {
+            userId: employee._id,
+            email: employee.email,
+            error: error.message,
+            stack: error.stack,
+            timestamp: new Date().toISOString()
+        });
+        if (error instanceof ApiError) {
+            throw error;
+        }
+        if (error.name === 'ValidationError') {
+            throw new ApiError(400, 'Invalid data provided for feedback export');
+        }
+        
+        if (error.name === 'CastError') {
+            throw new ApiError(400, 'Invalid ID format provided');
+        }
+        throw new ApiError(500, 'Failed to generate and send feedback report. Please try again later.');
+    }
+});
+
+export { createFeedback, getFeedbackById, updateFeedback, softDeleteFeedback, makeIsDeletedFalse, acknowledgeFeedback, getEmployeeFeedback, getManagerFeedback, bulkCreateFeedback , exportEmployeeFeedback }; 
