@@ -35,7 +35,7 @@ const sendEmail = async ({ to, subject, html }) => {
 const getEmailTransporter = () => {
     try {
         if (!emailTransporter) {
-            // Validate environment variables
+          
             if (!process.env.SMTP_EMAIL || !process.env.SMTP_PASSWORD) {
                 throw new Error("SMTP configuration not found in environment variables");
             }
@@ -54,7 +54,7 @@ const getEmailTransporter = () => {
                 rateLimit: 10,
             });
 
-            // Verify transporter configuration
+
             emailTransporter.verify((error, success) => {
                 if (error) {
                     console.error('Email transporter configuration error:', {
@@ -76,7 +76,7 @@ const getEmailTransporter = () => {
     }
 };
 
-// Add a function to test email configuration
+
 const testEmailConfiguration = async () => {
     try {
         const transporter = getEmailTransporter();

@@ -3,7 +3,7 @@ import PDFDocument from "pdfkit";
 const generateEmployeeFeedbackPDF = async (feedbacks, employeeName, employeeEmail) => {
     return new Promise((resolve, reject) => {
         try {
-            // Validate inputs
+         
             if (!feedbacks || !Array.isArray(feedbacks) || feedbacks.length === 0) {
                 return reject(new Error('No feedbacks provided or feedbacks is not an array'));
             }
@@ -32,7 +32,7 @@ const generateEmployeeFeedbackPDF = async (feedbacks, employeeName, employeeEmai
 
             const buffers = [];
 
-            // Handle document events
+          
             doc.on("data", (chunk) => {
                 buffers.push(chunk);
             });
@@ -53,9 +53,9 @@ const generateEmployeeFeedbackPDF = async (feedbacks, employeeName, employeeEmai
                 reject(new Error(`PDF generation failed: ${error.message}`));
             });
 
-            // Generate PDF content
+         
             try {
-                // Header
+            
                 doc.fontSize(20)
                     .fillColor('#2c3e50')
                     .text('Employee Feedback Report', { align: 'center' });
@@ -66,7 +66,7 @@ const generateEmployeeFeedbackPDF = async (feedbacks, employeeName, employeeEmai
 
                 doc.moveDown(2);
 
-                // Employee details
+              
                 doc.fontSize(14)
                     .fillColor("#34495e")
                     .text(`Employee: ${employeeName}`, { underline: true });
@@ -80,14 +80,13 @@ const generateEmployeeFeedbackPDF = async (feedbacks, employeeName, employeeEmai
 
                 doc.moveDown(2);
 
-                // Calculate sentiment summary
+              
                 const sentimentCounts = feedbacks.reduce((acc, fb) => {
                     const sentiment = fb.sentiment || 'unknown';
                     acc[sentiment] = (acc[sentiment] || 0) + 1;
                     return acc;
                 }, {});
 
-                // Feedback summary
                 doc.fontSize(12)
                     .fillColor('#2c3e50')
                     .text('Feedback Summary:', { underline: true });
@@ -109,22 +108,22 @@ const generateEmployeeFeedbackPDF = async (feedbacks, employeeName, employeeEmai
 
                 doc.moveDown(2);
 
-                // Individual feedback records
+        
                 feedbacks.forEach((fb, idx) => {
                     try {
-                        // Check if we need a new page
+                      
                         if (doc.y > 700) {
                             doc.addPage();
                         }
 
-                        // Feedback header
+                      
                         doc.fontSize(12)
                             .fillColor('#2c3e50')
                             .text(`Feedback #${idx + 1}`, { underline: true });
 
                         doc.moveDown(0.5);
 
-                        // Sentiment
+                       
                         const sentiment = fb.sentiment || 'unknown';
                         const sentimentColor = sentiment === "positive" ? '#27ae60' :
                             sentiment === 'neutral' ? '#f39c12' : 
@@ -134,7 +133,7 @@ const generateEmployeeFeedbackPDF = async (feedbacks, employeeName, employeeEmai
                             .fillColor(sentimentColor)
                             .text(`Sentiment: ${sentiment.toUpperCase()}`);
 
-                        // Strengths
+                      
                         doc.fontSize(10)
                             .fillColor('#2c3e50')
                             .text('Strengths:', { continued: false });
@@ -143,7 +142,7 @@ const generateEmployeeFeedbackPDF = async (feedbacks, employeeName, employeeEmai
                             .fillColor('#34495e')
                             .text(fb.strengths || 'No strengths provided', { indent: 20 });
 
-                        // Areas to improve
+                     
                         doc.fontSize(10)
                             .fillColor('#2c3e50')
                             .text('Areas to Improve:', { continued: false });
@@ -152,7 +151,7 @@ const generateEmployeeFeedbackPDF = async (feedbacks, employeeName, employeeEmai
                             .fillColor('#34495e')
                             .text(fb.areasToImprove || 'No areas to improve provided', { indent: 20 });
 
-                        // Manager information
+                       
                         if (fb.fromManagerId && typeof fb.fromManagerId === 'object' && fb.fromManagerId.name) {
                             doc.fontSize(9)
                                 .fillColor('#7f8c8d')
@@ -167,7 +166,7 @@ const generateEmployeeFeedbackPDF = async (feedbacks, employeeName, employeeEmai
                                 .text('Manager: Not specified');
                         }
 
-                        // Dates
+                       
                         const acknowledgedDate = fb.acknowledgedAt ? new Date(fb.acknowledgedAt).toLocaleDateString() : 'Not acknowledged';
                         const createdDate = fb.createdAt ? new Date(fb.createdAt).toLocaleDateString() : 'Unknown';
 
@@ -177,7 +176,7 @@ const generateEmployeeFeedbackPDF = async (feedbacks, employeeName, employeeEmai
 
                         doc.text(`Created: ${createdDate}`);
 
-                        // Separator line
+                     
                         doc.moveTo(50, doc.y + 10)
                            .lineTo(550, doc.y + 10)
                            .strokeColor('#ecf0f1')
@@ -188,7 +187,7 @@ const generateEmployeeFeedbackPDF = async (feedbacks, employeeName, employeeEmai
 
                     } catch (feedbackError) {
                         console.error(`Error processing feedback #${idx + 1}:`, feedbackError);
-                        // Continue with next feedback item
+                       
                         doc.fontSize(9)
                             .fillColor('#e74c3c')
                             .text(`Error processing feedback #${idx + 1}`);
@@ -196,13 +195,13 @@ const generateEmployeeFeedbackPDF = async (feedbacks, employeeName, employeeEmai
                     }
                 });
 
-                // Footer
+              
                 doc.fontSize(8)
                    .fillColor('#95a5a6')
                    .text('This report is confidential and generated automatically.', 
                          50, doc.page.height - 50, { align: 'center' });
 
-                // Finalize the document
+              
                 doc.end();
 
             } catch (contentError) {
@@ -216,8 +215,6 @@ const generateEmployeeFeedbackPDF = async (feedbacks, employeeName, employeeEmai
         }
     });
 };
-
-// Rate limiting with better error handling
 const exportRateLimit = new Map();
 const RATE_LIMIT_WINDOW = 60 * 60 * 1000; // 1 hour
 const MAX_EXPORTS_PER_HOUR = 5;
@@ -238,29 +235,21 @@ const checkRateLimit = (userId) => {
         }
 
         const userLimit = exportRateLimit.get(userKey);
-
-        // Reset if window has passed
         if (now > userLimit.resetTime) {
             exportRateLimit.set(userKey, { count: 1, resetTime: now + RATE_LIMIT_WINDOW });
             return true;
         }
-
-        // Check if limit exceeded
         if (userLimit.count >= MAX_EXPORTS_PER_HOUR) {
             return false;
         }
-
-        // Increment count
         userLimit.count += 1;
         return true;
 
     } catch (error) {
         console.error('Error in checkRateLimit:', error);
-        return false; // Fail safe - deny access if there's an error
+        return false; 
     }
 };
-
-// Cleanup old rate limit entries periodically
 setInterval(() => {
     const now = Date.now();
     for (const [key, value] of exportRateLimit.entries()) {
@@ -268,6 +257,6 @@ setInterval(() => {
             exportRateLimit.delete(key);
         }
     }
-}, RATE_LIMIT_WINDOW); // Clean up every hour
+}, RATE_LIMIT_WINDOW); 
 
 export { generateEmployeeFeedbackPDF, checkRateLimit };
