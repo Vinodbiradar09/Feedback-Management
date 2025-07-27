@@ -852,7 +852,7 @@ const getAllUsersWhoseRoleIsManagerAndEmployee = asyncHandler(async (req, res) =
 })
 
 const getUserEmployeeDetails = asyncHandler(async(req , res)=>{
-
+  
 })
 
 const getUserManagerDetails = asyncHandler(async(req, res)=>{

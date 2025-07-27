@@ -1035,19 +1035,18 @@ async function executeOptimizedAtomicTransfer(transferGroups, adminId, batchId, 
     }
 }
 
-
 async function executeBulkTransfers(transferGroups, session, metadata) {
     const bulkRemoveOps = [];
     const bulkAddOps = [];
     const transferResults = [];
 
-    // Prepare bulk operations
+  
     transferGroups.forEach(group => {
         const { sourceTeamId, destinationTeamId, employeeIds } = group;
         const sourceTeam = metadata.teamMap.get(sourceTeamId.toString());
         const destinationTeam = metadata.teamMap.get(destinationTeamId.toString());
 
-        // Bulk remove operation
+      
         bulkRemoveOps.push({
             updateOne: {
                 filter: { 
@@ -1061,7 +1060,7 @@ async function executeBulkTransfers(transferGroups, session, metadata) {
             }
         });
 
-        // Bulk add operation
+       
         bulkAddOps.push({
             updateOne: {
                 filter: { _id: destinationTeamId },
@@ -1080,13 +1079,13 @@ async function executeBulkTransfers(transferGroups, session, metadata) {
         });
     });
 
-    // Execute bulk operations in parallel for maximum performance
+   
     const [removeResults, addResults] = await Promise.all([
         Team.bulkWrite(bulkRemoveOps, { session, ordered: false }),
         Team.bulkWrite(bulkAddOps, { session, ordered: false })
     ]);
 
-    // Verify all operations succeeded
+  
     if (removeResults.modifiedCount !== transferGroups.length) {
         throw new ApiError(500, `Bulk remove operation failed. Expected: ${transferGroups.length}, Modified: ${removeResults.modifiedCount}`);
     }
@@ -1145,11 +1144,8 @@ async function captureTeamStatesOptimized(transferGroups, session) {
     return stateData?.teamStates || {};
 }
 
-
 async function verifyTransferConsistencyOptimized(transferGroups, session) {
     const teamIds = [...new Set(transferGroups.flatMap(g => [g.sourceTeamId, g.destinationTeamId]))];
-    
-    // Single aggregation to verify consistency
     const [consistencyCheck] = await Team.aggregate([
         {
             $match: { _id: { $in: teamIds } }
@@ -1460,6 +1456,5 @@ const getEmployeeTeam = asyncHandler(async (req, res) => {
 })
 
 const getAvailableEmployees = asyncHandler(async (req, res) => {
-
 })
 export { createTeam, addTeamEmployees, removeEmployeeFromTeam, getMyTeams, getTeamDetailsById, updateTeamDetails, softDeleteTeam, makeIsActiveForTeam, getTeamMembers, transferEmployee, replaceTeamManager, getEmployeeTeam, getAvailableEmployees };

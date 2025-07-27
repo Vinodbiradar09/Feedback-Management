@@ -6,14 +6,36 @@ import { Team } from "../models/teams.model.js";
 import { Feedback } from "../models/feedback.model.js";
 import { Feedbackhistory } from "../models/feedbackHistory.model.js";
 import mongoose, { version } from "mongoose";
-import PDFDocument from "pdfkit";
 import getStream from 'get-stream';
-import { generateEmployeeFeedbackPDF} from "../utils/generatePdf.js";
-import { getEmailTransporter , testEmailConfiguration } from "../utils/sendEmail.js";
+import { generateEmployeeFeedbackPDF , generateManagerFeedbackPDF } from "../utils/generatePdf.js";
+import { getEmailTransporter, testEmailConfiguration } from "../utils/sendEmail.js";
+
 
 const exportRateLimit = new Map();
 const RATE_LIMIT_WINDOW = 60 * 60 * 1000; // 1 hour
 const MAX_EXPORTS_PER_HOUR = 5;
+
+const managerExportRateLimit = new Map();
+const MANAGER_RATE_LIMIT_WINDOW = 60 * 60 * 1000; // 1 hour
+const MAX_MANAGER_EXPORTS_PER_HOUR = 10;
+
+let cachedAdmin = null;
+let adminCacheExpiry = 0;
+
+const getCachedAdmin = async () => {
+    const now = Date.now();
+
+    if (!cachedAdmin || now > adminCacheExpiry) {
+        cachedAdmin = await User.findOne(
+            {
+                role: "admin",
+                isActive: true,
+            }
+        ).select("name email userProfile");
+        adminCacheExpiry = now + (60 * 60 * 1000)
+    }
+    return cachedAdmin;
+}
 
 const checkRateLimit = (userId) => {
     try {
@@ -43,9 +65,34 @@ const checkRateLimit = (userId) => {
 
     } catch (error) {
         console.error('Error in checkRateLimit:', error);
-        return false; 
+        return false;
     }
 };
+
+const checkManagerRateLimit = (managerId) => {
+    const now = Date.now();
+    const managerKey = managerId.toString();
+
+    if (!managerExportRateLimit.has(managerKey)) {
+        managerExportRateLimit.set(managerKey, { count: 1, resetTime: now + MANAGER_RATE_LIMIT_WINDOW });
+        return true;
+    }
+
+    const managerLimit = managerExportRateLimit.get(managerKey);
+
+    if (now > managerLimit.resetTime) {
+        managerExportRateLimit.set(managerKey, { count: 1, resetTime: now + MANAGER_RATE_LIMIT_WINDOW });
+        return true;
+    }
+
+    if (managerLimit.count >= MAX_MANAGER_EXPORTS_PER_HOUR) {
+        return false;
+    }
+
+    managerLimit.count += 1;
+    return true;
+};
+
 
 const createFeedback = asyncHandler(async (req, res) => {
     const { employeeId } = req.params;
@@ -871,13 +918,13 @@ const exportEmployeeFeedback = asyncHandler(async (req, res) => {
     }
 
     try {
-      
+
         let feedbackQuery = Feedback.find(query)
             .select('strengths areasToImprove sentiment fromManagerId acknowledgedAt createdAt')
             .sort({ acknowledgedAt: -1 })
             .lean();
 
-      
+
         if (includeManagerDetails === 'true' || includeManagerDetails === true) {
             feedbackQuery = feedbackQuery.populate({
                 path: 'fromManagerId',
@@ -895,7 +942,7 @@ const exportEmployeeFeedback = asyncHandler(async (req, res) => {
 
         console.log(`Found ${feedbacks.length} feedback records`);
 
-      
+
         const MAX_FEEDBACK_RECORDS = 100;
         const limitedFeedbacks = feedbacks.slice(0, MAX_FEEDBACK_RECORDS);
 
@@ -903,12 +950,12 @@ const exportEmployeeFeedback = asyncHandler(async (req, res) => {
             console.warn(`User ${employee._id} attempted to export ${feedbacks.length} records, limited to ${MAX_FEEDBACK_RECORDS}`);
         }
         console.log('Generating PDF and setting up email transporter...');
-        
+
         let pdfBuffer;
         let transporter;
-        
+
         try {
-           
+
             pdfBuffer = await generateEmployeeFeedbackPDF(limitedFeedbacks, employee.name, employee.email);
             console.log('PDF generated successfully, buffer size:', pdfBuffer?.length);
         } catch (pdfError) {
@@ -917,7 +964,7 @@ const exportEmployeeFeedback = asyncHandler(async (req, res) => {
         }
 
         try {
-          
+
             transporter = getEmailTransporter();
             console.log('Email transporter obtained');
         } catch (emailError) {
@@ -972,7 +1019,7 @@ const exportEmployeeFeedback = asyncHandler(async (req, res) => {
                     code: emailError.code,
                     command: emailError.command
                 });
-                
+
                 if (retryCount >= maxRetries) {
                     throw new ApiError(500, 'Failed to send email after multiple attempts. Please try again later.');
                 }
@@ -1008,7 +1055,7 @@ const exportEmployeeFeedback = asyncHandler(async (req, res) => {
         if (error.name === 'ValidationError') {
             throw new ApiError(400, 'Invalid data provided for feedback export');
         }
-        
+
         if (error.name === 'CastError') {
             throw new ApiError(400, 'Invalid ID format provided');
         }
@@ -1016,4 +1063,247 @@ const exportEmployeeFeedback = asyncHandler(async (req, res) => {
     }
 });
 
-export { createFeedback, getFeedbackById, updateFeedback, softDeleteFeedback, makeIsDeletedFalse, acknowledgeFeedback, getEmployeeFeedback, getManagerFeedback, bulkCreateFeedback , exportEmployeeFeedback }; 
+const exportManagerFeedback = asyncHandler(async (req, res) => {
+    const manager = req.user;
+    const { sendToAdmin = false, dateRange, includeEmployeeStats = false } = req.body;
+
+    if (!manager || manager.role !== "manager") {
+        throw new ApiError(403, "Only managers are allowed to export feedback");
+    }
+    if (!manager.isActive) {
+        throw new ApiError(403, "Inactive managers cannot export feedback");
+    }
+    if (!checkManagerRateLimit(manager._id)) {
+        throw new ApiError(429, `Rate limit exceeded. Managers can only export ${MAX_MANAGER_EXPORTS_PER_HOUR} reports per hour`);
+    }
+
+    const query = {
+        fromManagerId: manager._id,
+        isDeleted: false
+    };
+
+    console.log('Initial manager export query:', {
+        managerId: manager._id,
+        managerEmail: manager.email,
+        query: query
+    });
+
+    if (dateRange) {
+        const { startDate, endDate } = dateRange;
+        if (startDate || endDate) {
+            query.acknowledgedAt = {};
+            if (startDate) query.acknowledgedAt.$gte = new Date(startDate);
+            if (endDate) query.acknowledgedAt.$lte = new Date(endDate);
+            console.log('Added date range filter:', query.acknowledgedAt);
+        }
+    }
+
+    try {
+       
+        const allFeedbackCount = await Feedback.countDocuments({
+            fromManagerId: manager._id,
+            isDeleted: false
+        });
+
+        console.log(`Manager ${manager._id} has ${allFeedbackCount} total feedback records`);
+
+        const acknowledgedCount = await Feedback.countDocuments({
+            fromManagerId: manager._id,
+            isAcknowledged: true,
+            isDeleted: false
+        });
+
+        console.log(`Manager ${manager._id} has ${acknowledgedCount} acknowledged feedback records`);
+
+        if (acknowledgedCount > 0) {
+            query.isAcknowledged = true;
+            console.log('Using acknowledged feedback only');
+        } else if (allFeedbackCount > 0) {
+            console.log('No acknowledged feedback found, using all feedback records');
+        } else {
+            console.log('No feedback records found at all for this manager');
+        }
+
+        console.log('Final query:', query);
+
+        const feedbacks = await Feedback.find(query)
+            .populate({
+                path: "toEmployeeId", 
+                select: "name fullName email",
+                options: { lean: true }
+            })
+            .select('strengths areasToImprove sentiment acknowledgedAt createdAt toEmployeeId')
+            .sort({ createdAt: -1 }) 
+            .lean();
+
+        console.log(`Found ${feedbacks?.length || 0} feedback records after population`);
+
+        if (feedbacks && feedbacks.length > 0) {
+            console.log('Sample feedback record:', {
+                id: feedbacks[0]._id,
+                toEmployeeId: feedbacks[0].toEmployeeId,
+                hasEmployee: !!feedbacks[0].toEmployeeId,
+                sentiment: feedbacks[0].sentiment,
+                isAcknowledged: feedbacks[0].isAcknowledged
+            });
+        }
+
+        if (!feedbacks || feedbacks.length === 0) {
+          
+            const errorDetails = {
+                totalFeedbacks: allFeedbackCount,
+                acknowledgedFeedbacks: acknowledgedCount,
+                managerId: manager._id,
+                managerEmail: manager.email,
+                queryUsed: query
+            };
+            
+            console.log('No feedback found - details:', errorDetails);
+            
+            throw new ApiError(404, `No eligible feedbacks found for export. Total feedback: ${allFeedbackCount}, Acknowledged: ${acknowledgedCount}`);
+        }
+
+        const validFeedbacks = feedbacks.filter(fb => fb.toEmployeeId && (fb.toEmployeeId.name || fb.toEmployeeId.fullName));
+        
+        if (validFeedbacks.length !== feedbacks.length) {
+            console.warn(`Filtered out ${feedbacks.length - validFeedbacks.length} feedback records with missing employee data`);
+        }
+
+        if (validFeedbacks.length === 0) {
+            throw new ApiError(404, "No feedback records with valid employee data found for export");
+        }
+
+        const MAX_FEEDBACK_RECORDS = 200;
+        const limitedFeedbacks = validFeedbacks.slice(0, MAX_FEEDBACK_RECORDS);
+        
+        if (validFeedbacks.length > MAX_FEEDBACK_RECORDS) {
+            console.warn(`Manager ${manager._id} attempted to export ${validFeedbacks.length} records, limited to ${MAX_FEEDBACK_RECORDS}`);
+        }
+
+        console.log(`Proceeding with ${limitedFeedbacks.length} feedback records for PDF generation`);
+
+        const [pdfBuffer, transporter, adminUser] = await Promise.all([
+            generateManagerFeedbackPDF(limitedFeedbacks, manager.name || manager.fullName, manager.email),
+            Promise.resolve(getEmailTransporter()),
+            sendToAdmin ? getCachedAdmin() : null
+        ]);
+
+        if (sendToAdmin && !adminUser) {
+            throw new ApiError(404, "No active admin found to send the PDF");
+        }
+
+        const currentDate = new Date().toISOString().split('T')[0];
+        const filename = `manager_feedback_export_${(manager.name || manager.fullName || 'manager').replace(/\s+/g, '_')}_${currentDate}.pdf`;
+
+        const attachments = [{
+            filename,
+            content: pdfBuffer,
+            contentType: "application/pdf"
+        }];
+
+        const emailPromises = [];
+
+        const managerEmailOptions = {
+            from: `"Feedback System" <${process.env.SMTP_EMAIL}>`,
+            to: manager.email,
+            subject: `Your Feedback Export Report - ${new Date().toLocaleDateString()}`,
+            html: `
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                    <h2 style="color: #2c3e50;">Your Feedback Export Report</h2>
+                    <p>Dear ${manager.name || manager.fullName || 'Manager'},</p>
+                    <p>Your requested feedback export report is attached as a PDF document.</p>
+                    <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
+                        <h3 style="margin: 0; color: #495057;">Export Summary:</h3>
+                        <ul style="margin: 10px 0;">
+                            <li>Total Feedback Records: <strong>${limitedFeedbacks.length}</strong></li>
+                            <li>Unique Employees: <strong>${new Set(limitedFeedbacks.map(f => f.toEmployeeId._id.toString())).size}</strong></li>
+                            <li>Export Date: <strong>${new Date().toLocaleString()}</strong></li>
+                            ${validFeedbacks.length > MAX_FEEDBACK_RECORDS ? `<li style="color: #e74c3c;">Note: Limited to ${MAX_FEEDBACK_RECORDS} most recent records</li>` : ''}
+                        </ul>
+                    </div>
+                    <p style="color: #6c757d; font-size: 12px;">
+                        This report is confidential and intended for internal use only.
+                    </p>
+                </div>
+            `,
+            attachments
+        };
+
+        emailPromises.push(transporter.sendMail(managerEmailOptions));
+
+        if (sendToAdmin && adminUser) {
+            const adminEmailOptions = {
+                from: `"Feedback System" <${process.env.SMTP_EMAIL}>`,
+                to: adminUser.email,
+                subject: `Manager Feedback Export - ${manager.name || manager.fullName}`,
+                html: `
+                    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                        <h2 style="color: #2c3e50;">Manager Feedback Export Notification</h2>
+                        <p>Dear Admin,</p>
+                        <p>Manager <strong>${manager.name || manager.fullName}</strong> (${manager.email}) has shared their feedback export report with you.</p>
+                        <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
+                            <h3 style="margin: 0; color: #495057;">Report Details:</h3>
+                            <ul style="margin: 10px 0;">
+                                <li>Manager: <strong>${manager.name || manager.fullName}</strong></li>
+                                <li>Email: <strong>${manager.email}</strong></li>
+                                <li>Feedback Records: <strong>${limitedFeedbacks.length}</strong></li>
+                                <li>Generated: <strong>${new Date().toLocaleString()}</strong></li>
+                            </ul>
+                        </div>
+                        <p style="color: #6c757d; font-size: 12px;">
+                            This report contains confidential feedback information.
+                        </p>
+                    </div>
+                `,
+                attachments
+            };
+
+            emailPromises.push(transporter.sendMail(adminEmailOptions));
+        }
+
+        const emailResults = await Promise.allSettled(emailPromises);
+
+        const failedEmails = emailResults.filter(result => result.status === "rejected");
+        if (failedEmails.length > 0) {
+            console.error('Some emails failed to send:', failedEmails);
+
+            if (emailResults[0].status === "rejected") {
+                throw new ApiError(500, 'Failed to send report to manager email');
+            }
+        }
+
+        const managerLimit = managerExportRateLimit.get(manager._id.toString());
+        const remainingExports = Math.max(0, MAX_MANAGER_EXPORTS_PER_HOUR - (managerLimit?.count || 0));
+
+        const responseMessage = `PDF successfully sent to ${manager.email}${sendToAdmin ? ` and admin (${adminUser?.email})` : ''}`;
+        const responseData = {
+            success: true,
+            recordsExported: limitedFeedbacks.length,
+            totalRecords: validFeedbacks.length,
+            uniqueEmployees: new Set(limitedFeedbacks.map(f => f.toEmployeeId._id.toString())).size,
+            sentToManager: manager.email,
+            sentToAdmin: sendToAdmin ? adminUser?.email : null,
+            generatedAt: new Date().toISOString(),
+            remainingExports: remainingExports
+        };
+
+        return res.status(200).json(new ApiResponse(200, responseData, responseMessage));
+
+    } catch (error) {
+        console.error('Manager export error:', {
+            managerId: manager._id,
+            email: manager.email,
+            error: error.message,
+            stack: error.stack,
+            timestamp: new Date().toISOString()
+        });
+
+        if (error instanceof ApiError) {
+            throw error;
+        }
+        
+        throw new ApiError(500, "Failed to generate and send feedback export. Please try again later.");
+    }
+});
+
+export { createFeedback, getFeedbackById, updateFeedback, softDeleteFeedback, makeIsDeletedFalse, acknowledgeFeedback, getEmployeeFeedback, getManagerFeedback, bulkCreateFeedback, exportEmployeeFeedback , exportManagerFeedback}; 

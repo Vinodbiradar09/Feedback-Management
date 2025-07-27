@@ -1,6 +1,6 @@
 import {Router} from "express";
 import { verifyJwt } from "../middlewares/auth.middleware.js";
-import {createFeedback , getFeedbackById , updateFeedback , softDeleteFeedback , makeIsDeletedFalse , acknowledgeFeedback , getEmployeeFeedback , getManagerFeedback , bulkCreateFeedback , exportEmployeeFeedback} from "../controllers/feedback.controllers.js";
+import {createFeedback , getFeedbackById , updateFeedback , softDeleteFeedback , makeIsDeletedFalse , acknowledgeFeedback , getEmployeeFeedback , getManagerFeedback , bulkCreateFeedback , exportEmployeeFeedback , exportManagerFeedback} from "../controllers/feedback.controllers.js";
 
 const feedbackRouter = Router();
 
@@ -23,4 +23,6 @@ feedbackRouter.route("/getManagerFeedback").get(verifyJwt , getManagerFeedback);
 feedbackRouter.route("/bulkCreateFeedback").post(verifyJwt , bulkCreateFeedback);
 
 feedbackRouter.route("/feedbackExport").post(verifyJwt , exportEmployeeFeedback);
+
+feedbackRouter.route("/feedbackExportForManagers").post(verifyJwt , exportManagerFeedback);
 export {feedbackRouter};

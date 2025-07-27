@@ -215,48 +215,170 @@ const generateEmployeeFeedbackPDF = async (feedbacks, employeeName, employeeEmai
         }
     });
 };
-const exportRateLimit = new Map();
-const RATE_LIMIT_WINDOW = 60 * 60 * 1000; // 1 hour
-const MAX_EXPORTS_PER_HOUR = 5;
 
-const checkRateLimit = (userId) => {
-    try {
-        if (!userId) {
-            console.error('checkRateLimit called without userId');
-            return false;
+const generateManagerFeedbackPDF = async (feedbacks, managerName, managerEmail) => {
+    return new Promise((resolve, reject) => {
+        try {
+            const doc = new PDFDocument({
+                size: 'A4',
+                margin: 50,
+                bufferPages: true,
+                info: {
+                    Title: `Manager Feedback Export - ${managerName}`,
+                    Author: 'Company Feedback System',
+                    Subject: 'Manager Feedback Export Report',
+                    CreationDate: new Date()
+                }
+            });
+
+            const buffers = [];
+            
+            doc.on('data', buffers.push.bind(buffers));
+            doc.on('end', () => {
+                const pdfBuffer = Buffer.concat(buffers);
+                resolve(pdfBuffer);
+            });
+            doc.on('error', reject);
+
+            doc.fontSize(20)
+               .fillColor('#2c3e50')
+               .text('Manager Feedback Export Report', { align: 'center' });
+            
+            doc.fontSize(12)
+               .fillColor('#7f8c8d')
+               .text(`Generated on: ${new Date().toLocaleString()}`, { align: 'center' });
+            
+            doc.moveDown(2);
+
+            doc.fontSize(14)
+               .fillColor('#34495e')
+               .text(`Manager: ${managerName}`, { underline: true });
+            
+            doc.fontSize(10)
+               .fillColor('#7f8c8d')
+               .text(`Email: ${managerEmail}`);
+            
+            doc.fontSize(10)
+               .text(`Total Feedback Given: ${feedbacks.length}`);
+            
+            doc.moveDown(2);
+
+            const sentimentCounts = feedbacks.reduce((acc, fb) => {
+                acc[fb.sentiment] = (acc[fb.sentiment] || 0) + 1;
+                return acc;
+            }, {});
+
+            const uniqueEmployees = new Set(feedbacks.map(fb => fb.toEmployeeId._id.toString())).size;
+
+            doc.fontSize(12)
+               .fillColor('#2c3e50')
+               .text('Export Summary:', { underline: true });
+            
+            doc.fontSize(10)
+               .fillColor('#34495e')
+               .text(`Unique Employees: ${uniqueEmployees}`);
+            
+            doc.fillColor('#27ae60')
+               .text(`✓ Positive Feedback: ${sentimentCounts.positive || 0}`);
+            
+            doc.fillColor('#f39c12')
+               .text(`◐ Neutral Feedback: ${sentimentCounts.neutral || 0}`);
+            
+            doc.fillColor('#e74c3c')
+               .text(`✗ Negative Feedback: ${sentimentCounts.negative || 0}`);
+            
+            doc.moveDown(2);
+
+            const feedbacksByEmployee = feedbacks.reduce((acc, feedback) => {
+                const employeeId = feedback.toEmployeeId._id.toString();
+                if (!acc[employeeId]) {
+                    acc[employeeId] = {
+                        employee: feedback.toEmployeeId,
+                        feedbacks: []
+                    };
+                }
+                acc[employeeId].feedbacks.push(feedback);
+                return acc;
+            }, {});
+
+            Object.values(feedbacksByEmployee).forEach((employeeGroup, empIndex) => {
+               
+                if (doc.y > 650) {
+                    doc.addPage();
+                }
+
+                doc.fontSize(14)
+                   .fillColor('#2c3e50')
+                   .text(`Employee ${empIndex + 1}: ${employeeGroup.employee.name || employeeGroup.employee.fullName}`, { underline: true });
+                
+                doc.fontSize(10)
+                   .fillColor('#7f8c8d')
+                   .text(`Email: ${employeeGroup.employee.email}`);
+                
+                doc.fontSize(9)
+                   .text(`Total Feedback Given: ${employeeGroup.feedbacks.length}`);
+                
+                doc.moveDown(1);
+
+                employeeGroup.feedbacks.forEach((feedback, fbIndex) => {
+                    if (doc.y > 700) {
+                        doc.addPage();
+                    }
+
+                    doc.fontSize(11)
+                       .fillColor('#34495e')
+                       .text(`Feedback ${fbIndex + 1}:`, { indent: 20 });
+
+                    const sentimentColor = feedback.sentiment === 'positive' ? '#27ae60' : 
+                                         feedback.sentiment === 'neutral' ? '#f39c12' : '#e74c3c';
+                    
+                    doc.fontSize(9)
+                       .fillColor(sentimentColor)
+                       .text(`Sentiment: ${feedback.sentiment.toUpperCase()}`, { indent: 20 });
+
+                    doc.fontSize(9)
+                       .fillColor('#2c3e50')
+                       .text('Strengths:', { indent: 20 });
+                    
+                    doc.fontSize(8)
+                       .fillColor('#34495e')
+                       .text(feedback.strengths, { indent: 40 });
+
+                    doc.fontSize(9)
+                       .fillColor('#2c3e50')
+                       .text('Areas to Improve:', { indent: 20 });
+                    
+                    doc.fontSize(8)
+                       .fillColor('#34495e')
+                       .text(feedback.areasToImprove, { indent: 40 });
+
+                    doc.fontSize(8)
+                       .fillColor('#7f8c8d')
+                       .text(`Given: ${new Date(feedback.createdAt).toLocaleDateString()}`, { indent: 20 });
+                    
+                    doc.text(`Acknowledged: ${new Date(feedback.acknowledgedAt).toLocaleDateString()}`, { indent: 20 });
+
+                    doc.moveDown(0.5);
+                });
+                doc.moveTo(50, doc.y + 5)
+                   .lineTo(550, doc.y + 5)
+                   .strokeColor('#bdc3c7')
+                   .lineWidth(1)
+                   .stroke();
+
+                doc.moveDown(1);
+            });
+            doc.fontSize(8)
+               .fillColor('#95a5a6')
+               .text('This report is confidential and for internal use only.', 
+                     50, doc.page.height - 50, { align: 'center' });
+
+            doc.end();
+
+        } catch (error) {
+            reject(error);
         }
-
-        const now = Date.now();
-        const userKey = userId.toString();
-
-        if (!exportRateLimit.has(userKey)) {
-            exportRateLimit.set(userKey, { count: 1, resetTime: now + RATE_LIMIT_WINDOW });
-            return true;
-        }
-
-        const userLimit = exportRateLimit.get(userKey);
-        if (now > userLimit.resetTime) {
-            exportRateLimit.set(userKey, { count: 1, resetTime: now + RATE_LIMIT_WINDOW });
-            return true;
-        }
-        if (userLimit.count >= MAX_EXPORTS_PER_HOUR) {
-            return false;
-        }
-        userLimit.count += 1;
-        return true;
-
-    } catch (error) {
-        console.error('Error in checkRateLimit:', error);
-        return false; 
-    }
+    });
 };
-setInterval(() => {
-    const now = Date.now();
-    for (const [key, value] of exportRateLimit.entries()) {
-        if (now > value.resetTime) {
-            exportRateLimit.delete(key);
-        }
-    }
-}, RATE_LIMIT_WINDOW); 
 
-export { generateEmployeeFeedbackPDF, checkRateLimit };
+export { generateEmployeeFeedbackPDF, generateManagerFeedbackPDF };
