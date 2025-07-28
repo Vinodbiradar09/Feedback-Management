@@ -7,8 +7,9 @@ import { Feedback } from "../models/feedback.model.js";
 import { Feedbackhistory } from "../models/feedbackHistory.model.js";
 import mongoose, { version } from "mongoose";
 import getStream from 'get-stream';
-import { generateEmployeeFeedbackPDF , generateManagerFeedbackPDF } from "../utils/generatePdf.js";
+import { generateEmployeeFeedbackPDF, generateManagerFeedbackPDF } from "../utils/generatePdf.js";
 import { getEmailTransporter, testEmailConfiguration } from "../utils/sendEmail.js";
+import {buildAccessControlAndFilters , generateFeedbackStatistics , generateFeedbackTrends} from "../utils/helperFunc.js";
 
 
 const exportRateLimit = new Map();
@@ -1099,7 +1100,7 @@ const exportManagerFeedback = asyncHandler(async (req, res) => {
     }
 
     try {
-       
+
         const allFeedbackCount = await Feedback.countDocuments({
             fromManagerId: manager._id,
             isDeleted: false
@@ -1128,12 +1129,12 @@ const exportManagerFeedback = asyncHandler(async (req, res) => {
 
         const feedbacks = await Feedback.find(query)
             .populate({
-                path: "toEmployeeId", 
+                path: "toEmployeeId",
                 select: "name fullName email",
                 options: { lean: true }
             })
             .select('strengths areasToImprove sentiment acknowledgedAt createdAt toEmployeeId')
-            .sort({ createdAt: -1 }) 
+            .sort({ createdAt: -1 })
             .lean();
 
         console.log(`Found ${feedbacks?.length || 0} feedback records after population`);
@@ -1149,7 +1150,7 @@ const exportManagerFeedback = asyncHandler(async (req, res) => {
         }
 
         if (!feedbacks || feedbacks.length === 0) {
-          
+
             const errorDetails = {
                 totalFeedbacks: allFeedbackCount,
                 acknowledgedFeedbacks: acknowledgedCount,
@@ -1157,14 +1158,14 @@ const exportManagerFeedback = asyncHandler(async (req, res) => {
                 managerEmail: manager.email,
                 queryUsed: query
             };
-            
+
             console.log('No feedback found - details:', errorDetails);
-            
+
             throw new ApiError(404, `No eligible feedbacks found for export. Total feedback: ${allFeedbackCount}, Acknowledged: ${acknowledgedCount}`);
         }
 
         const validFeedbacks = feedbacks.filter(fb => fb.toEmployeeId && (fb.toEmployeeId.name || fb.toEmployeeId.fullName));
-        
+
         if (validFeedbacks.length !== feedbacks.length) {
             console.warn(`Filtered out ${feedbacks.length - validFeedbacks.length} feedback records with missing employee data`);
         }
@@ -1175,7 +1176,7 @@ const exportManagerFeedback = asyncHandler(async (req, res) => {
 
         const MAX_FEEDBACK_RECORDS = 200;
         const limitedFeedbacks = validFeedbacks.slice(0, MAX_FEEDBACK_RECORDS);
-        
+
         if (validFeedbacks.length > MAX_FEEDBACK_RECORDS) {
             console.warn(`Manager ${manager._id} attempted to export ${validFeedbacks.length} records, limited to ${MAX_FEEDBACK_RECORDS}`);
         }
@@ -1301,9 +1302,59 @@ const exportManagerFeedback = asyncHandler(async (req, res) => {
         if (error instanceof ApiError) {
             throw error;
         }
-        
         throw new ApiError(500, "Failed to generate and send feedback export. Please try again later.");
     }
 });
 
-export { createFeedback, getFeedbackById, updateFeedback, softDeleteFeedback, makeIsDeletedFalse, acknowledgeFeedback, getEmployeeFeedback, getManagerFeedback, bulkCreateFeedback, exportEmployeeFeedback , exportManagerFeedback}; 
+const getFeedbackStats = asyncHandler(async (req, res) => {
+    const { employeeId, teamId, managerId, startDate, endDate, sentiment, acknowledged, page = 1, limit = 10, sortBy = 'recent' } = req.query;
+    const requesterId = req.user._id;
+    const requesterRole = req.user.role;
+
+    if (!["admin", "manager"].includes(requesterRole)) {
+        throw new ApiError(403, "Only administrators and managers can access feedback statistics");
+    }
+
+    const { baseMatchStage, accessScope } = await buildAccessControlAndFilters({
+        requesterId,
+        requesterRole,
+        employeeId,
+        teamId,
+        managerId,
+        startDate,
+        endDate,
+        sentiment,
+        acknowledged
+    });
+
+    const [statsResult, trendsResult] = await Promise.all([
+        generateFeedbackStatistics(baseMatchStage, sortBy, page, limit),
+        generateFeedbackTrends(baseMatchStage)
+    ]);
+
+    const result = {
+        accessScope,
+        statistics: statsResult,
+        trends: trendsResult,
+        filters: {
+            employeeId: employeeId || null,
+            teamId: teamId || null,
+            managerId: managerId || null,
+            dateRange: {
+                startDate: startDate || null,
+                endDate: endDate || null
+            },
+            sentiment: sentiment || null,
+            acknowledged: acknowledged !== undefined ? acknowledged : null
+        },
+        pagination: {
+            currentPage: parseInt(page),
+            itemsPerPage: parseInt(limit),
+            totalItems: statsResult.totalCount,
+            totalPages: Math.ceil(statsResult.totalCount / parseInt(limit))
+        }
+    };
+    res.status(200).json(new ApiResponse(200, result, "Employee feedback statistics retrieved successfully"));
+})
+
+export { createFeedback, getFeedbackById, updateFeedback, softDeleteFeedback, makeIsDeletedFalse, acknowledgeFeedback, getEmployeeFeedback, getManagerFeedback, bulkCreateFeedback, exportEmployeeFeedback, exportManagerFeedback , getFeedbackStats }; 
