@@ -8,6 +8,7 @@ import { Feedbackhistory } from "../models/feedbackHistory.model.js";
 import mongoose from "mongoose";
 
 
+
 const getFeedbackHistory = asyncHandler(async (req, res) => {
     const { _id: requesterId, role: requesterRole } = req.user;
     const { feedbackId } = req.params;
@@ -299,118 +300,251 @@ const deleteFeedbackHistory = asyncHandler(async (req, res) => {
 });
 
 const getFeedbackHistoryByManager = asyncHandler(async (req, res) => {
-  let managerId;
+    let managerId;
 
-  if (req.user.role === "admin") {
-    managerId = req.params.managerId;
-    if (!managerId || !mongoose.isValidObjectId(managerId)) {
-      throw new ApiError(400, "Invalid manager ID");
+    if (req.user.role === "admin") {
+        managerId = req.params.managerId;
+        if (!managerId || !mongoose.isValidObjectId(managerId)) {
+            throw new ApiError(400, "Invalid manager ID");
+        }
+    } else if (req.user.role === "manager") {
+        managerId = req.user._id;
+    } else {
+        throw new ApiError(403, "You are not authorized to view this resource");
     }
-  } else if (req.user.role === "manager") {
-    managerId = req.user._id;
-  } else {
-    throw new ApiError(403, "You are not authorized to view this resource");
-  }
 
-  const result = await Feedbackhistory.aggregate([
-    {
-      $match: {
-        editedByManagersId: new mongoose.Types.ObjectId(managerId),
-      },
-    },
-    {
-      $lookup: {
-        from: "feedbacks",
-        localField: "feedbackId",
-        foreignField: "_id",
-        as: "feedbackInfo",
-        pipeline: [
-          {
+    const result = await Feedbackhistory.aggregate([
+        {
+            $match: {
+                editedByManagersId: new mongoose.Types.ObjectId(managerId),
+            },
+        },
+        {
             $lookup: {
-              from: "users",
-              localField: "toEmployeeId",
-              foreignField: "_id",
-              as: "employeeDetails",
-              pipeline: [
-                {
-                  $project: {
-                    name: 1,
-                    email: 1,
-                    role: 1,
-                    isActive: 1,
-                    userProfile: 1,
-                  },
-                },
-              ],
+                from: "feedbacks",
+                localField: "feedbackId",
+                foreignField: "_id",
+                as: "feedbackInfo",
+                pipeline: [
+                    {
+                        $lookup: {
+                            from: "users",
+                            localField: "toEmployeeId",
+                            foreignField: "_id",
+                            as: "employeeDetails",
+                            pipeline: [
+                                {
+                                    $project: {
+                                        name: 1,
+                                        email: 1,
+                                        role: 1,
+                                        isActive: 1,
+                                        userProfile: 1,
+                                    },
+                                },
+                            ],
+                        },
+                    },
+                    {
+                        $addFields: {
+                            employee: { $arrayElemAt: ["$employeeDetails", 0] },
+                        },
+                    },
+                    {
+                        $project: {
+                            strengths: 1,
+                            areasToImprove: 1,
+                            sentiment: 1,
+                            isAcknowledged: 1,
+                            acknowledgedAt: 1,
+                            version: 1,
+                            isDeleted: 1,
+                            employee: 1,
+                        },
+                    },
+                ],
             },
-          },
-          {
+        },
+        {
+            $lookup: {
+                from: "users",
+                localField: "editedByManagersId",
+                foreignField: "_id",
+                as: "managerDetails",
+                pipeline: [
+                    {
+                        $project: {
+                            name: 1,
+                            email: 1,
+                            role: 1,
+                            isActive: 1,
+                            userProfile: 1,
+                        },
+                    },
+                ],
+            },
+        },
+        {
             $addFields: {
-              employee: { $arrayElemAt: ["$employeeDetails", 0] },
+                manager: { $arrayElemAt: ["$managerDetails", 0] },
             },
-          },
-          {
+        },
+        {
             $project: {
-              strengths: 1,
-              areasToImprove: 1,
-              sentiment: 1,
-              isAcknowledged: 1,
-              acknowledgedAt: 1,
-              version: 1,
-              isDeleted: 1,
-              employee: 1,
+                previousData: 1,
+                editReason: 1,
+                editedAt: 1,
+                feedbackInfo: 1,
+                manager: 1,
             },
-          },
-        ],
-      },
-    },
-    {
-      $lookup: {
-        from: "users",
-        localField: "editedByManagersId",
-        foreignField: "_id",
-        as: "managerDetails",
-        pipeline: [
-          {
-            $project: {
-              name: 1,
-              email: 1,
-              role: 1,
-              isActive: 1,
-              userProfile: 1,
-            },
-          },
-        ],
-      },
-    },
-    {
-      $addFields: {
-        manager: { $arrayElemAt: ["$managerDetails", 0] },
-      },
-    },
-    {
-      $project: {
-        previousData: 1,
-        editReason: 1,
-        editedAt: 1,
-        feedbackInfo: 1,
-        manager: 1,
-      },
-    },
-    {
-      $sort: { editedAt: -1 }, // Optional sorting
-    },
-  ]);
+        },
+        {
+            $sort: { editedAt: -1 }, // Optional sorting
+        },
+    ]);
 
-  if (!result || result.length === 0) {
-    throw new ApiError(404, "No feedback history found for this manager");
-  }
+    if (!result || result.length === 0) {
+        throw new ApiError(404, "No feedback history found for this manager");
+    }
 
-  res
-    .status(200)
-    .json(new ApiResponse(200, result, "Successfully fetched feedback history by manager"));
+    res
+        .status(200)
+        .json(new ApiResponse(200, result, "Successfully fetched feedback history by manager"));
 });
 
+const getFeedbackHistoryByDateRange = asyncHandler(async (req, res) => {
+    const { startDate, endDate, employeeId } = req.query;
+    const { _id: userId, role } = req.user;
 
+    if (!startDate || !endDate) {
+        throw new ApiError(400, "startDate and endDate are required");
+    }
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+    end.setHours(23, 59, 59, 999);          // include full end‑day
 
-export { getFeedbackHistory, getFeedbackHistoryById, deleteFeedbackHistory , getFeedbackHistoryByManager};
+    if (isNaN(start) || isNaN(end) || start > end) {
+        throw new ApiError(400, "Invalid date range");
+    }
+
+    if (!["admin", "manager"].includes(role)) {
+        throw new ApiError(403, "Only admins and managers can access feedback history");
+    }
+    let allowedEmployeeIds = null;
+
+    if (role === "manager") {
+        const team = await Team.findOne({
+            managerId: userId,
+            isActive: true
+        }).select("employeeIds");
+
+        if (!team) {
+            throw new ApiError(403, "You don't manage any active team");
+        }
+
+        allowedEmployeeIds = team.employeeIds.map(id => id.toString());
+
+        if (employeeId) {
+            if (!mongoose.isValidObjectId(employeeId)) {
+                throw new ApiError(400, "Invalid employeeId");
+            }
+            if (!allowedEmployeeIds.includes(employeeId)) {
+                throw new ApiError(403, "Employee not in your team");
+            }
+        }
+    }
+
+    const history = await Feedbackhistory.aggregate([
+        {
+            $match: {
+                editedAt: { $gte: start, $lte: end }
+            }
+        },
+        {
+            $lookup: {
+                from: "feedbacks",
+                localField: "feedbackId",
+                foreignField: "_id",
+                as: "feedback",
+                pipeline: [
+                    {
+                        $project: {
+                            toEmployeeId: 1,
+                            strengths: 1,
+                            areasToImprove: 1,
+                            sentiment: 1,
+                            isAcknowledged: 1
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            $unwind: "$feedback"
+        }
+
+    ])
+
+    const employeeFilter = {};
+    if (employeeId) {
+        employeeFilter["feedback.toEmployeeId"] = new mongoose.Types.ObjectId(employeeId);
+    } else if (allowedEmployeeIds) {
+        employeeFilter["feedback.toEmployeeId"] = { $in: allowedEmployeeIds.map(id => new mongoose.Types.ObjectId(id)) };
+    }
+    if (Object.keys(employeeFilter).length) {
+        history.push({ $match: employeeFilter });
+    }
+
+    history.push(
+        {
+            $project: {
+                previousData: 1,
+                editReason: 1,
+                editedAt: 1,
+                feedbackId: 1,
+                "feedback.toEmployeeId": 1,
+                "feedback.sentiment": 1,
+                "feedback.isAcknowledged": 1
+            }
+        },
+        { $sort: { editedAt: -1 } }
+    );
+
+    res
+        .status(200)
+        .json(new ApiResponse(200, history, "Feedback history fetched successfully"));
+
+})
+
+const bulkDeleteHistory = asyncHandler(async (req, res) => {
+    const { _id: userId, role } = req.user;
+
+    if (role !== "admin") {
+        throw new ApiError(403, "Only admins are allowed to perform bulk delete.");
+    }
+
+    const { historyIds } = req.body;
+
+    if (!Array.isArray(historyIds) || historyIds.length === 0) {
+        throw new ApiError(400, "historyIds must be a non-empty array.");
+    }
+
+    const validIds = historyIds.filter((id) => mongoose.isValidObjectId(id));
+    if (validIds.length === 0) {
+        throw new ApiError(400, "No valid ObjectIds found in the request.");
+    }
+
+    const deleteResult = await Feedbackhistory.deleteMany({
+        _id: { $in: validIds },
+    });
+
+    res.status(200).json(
+        new ApiResponse(200, {
+            deletedCount: deleteResult.deletedCount,
+            attempted: validIds.length,
+            invalidIds: historyIds.length - validIds.length,
+        }, "Selected feedback history records deleted successfully.")
+    );
+})
+
+export { getFeedbackHistory, getFeedbackHistoryById, deleteFeedbackHistory, getFeedbackHistoryByManager, getFeedbackHistoryByDateRange, bulkDeleteHistory };
