@@ -1,5 +1,5 @@
 import {Router} from "express";
-import { registerUser, loginUser , logoutUser , refreshAccessToken , getProfile , forgotPassword , resetPassword , updateUserDetails , updateUsersProfile , changePassword , softdeactivateAccount , getUserById , updateUserRole , searchUsers , getAllUsersWhoseRoleIsEmployee , getAllUsersWhoseRoleIsManagerAndEmployee} from "../controllers/user.controllers.js";
+import { registerUser, loginUser , logoutUser , refreshAccessToken , getProfile , forgotPassword , resetPassword , updateUserDetails , updateUsersProfile , changePassword , softdeactivateAccount , getUserById , updateUserRole , searchUsers , getAllUsersWhoseRoleIsEmployee , getAllUsersWhoseRoleIsManagerAndEmployee , getUserEmployeeDetails , getUserManagerDetails} from "../controllers/user.controllers.js";
 import {upload} from "../middlewares/multer.middleware.js";
 import { verifyJwt } from "../middlewares/auth.middleware.js";
 
@@ -35,6 +35,10 @@ router.route("/updateRole/:targetedUserId").patch(verifyJwt , updateUserRole);
 router.route("/getAllUserEmployee").get(verifyJwt , getAllUsersWhoseRoleIsEmployee);
 
 router.route("/getAllUsers").get(verifyJwt , getAllUsersWhoseRoleIsManagerAndEmployee);
+
+router.route("/getEmployeeDetails/:employeeId").get(verifyJwt , getUserEmployeeDetails);
+
+router.route("/getManagerDetails/:managerId").get(verifyJwt , getUserManagerDetails);
 
 
 export {router}; 

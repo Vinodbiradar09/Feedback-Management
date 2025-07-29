@@ -9,6 +9,8 @@ import { options } from "../utils/cookies.js";
 import jwt from "jsonwebtoken";
 import { sendEmail } from "../utils/sendEmail.js";
 import mongoose from "mongoose";
+import { application } from "express";
+import { Team } from "../models/teams.model.js";
 
 const generateAccessAndRefreshTokens = async (userId) => {
     try {
@@ -821,7 +823,7 @@ const getAllUsersWhoseRoleIsManagerAndEmployee = asyncHandler(async (req, res) =
     const skip = (pageNum - 1) * pageSize;
 
     const filter = {
-        role: {$in: ["manager" , "employee"]},
+        role: { $in: ["manager", "employee"] },
         isActive: true,
     }
 
@@ -838,7 +840,7 @@ const getAllUsersWhoseRoleIsManagerAndEmployee = asyncHandler(async (req, res) =
     const totalCount = await User.countDocuments(filter);
     const totalPages = Math.ceil(totalCount / pageSize);
 
-     res.status(200).json({
+    res.status(200).json({
         users,
         pagination: {
             currentPage: pageNum,
@@ -851,14 +853,135 @@ const getAllUsersWhoseRoleIsManagerAndEmployee = asyncHandler(async (req, res) =
     });
 })
 
-const getUserEmployeeDetails = asyncHandler(async(req , res)=>{
-  
-})
+const getUserEmployeeDetails = asyncHandler(async (req, res) => {
+    const { employeeId } = req.params;
+    const manager = req.user;
 
-const getUserManagerDetails = asyncHandler(async(req, res)=>{
-    
-})
+    if (!employeeId || !mongoose.isValidObjectId(employeeId)) {
+        throw new ApiError(400, "Invalid format of the employeeId");
+    }
 
+    if (manager.role !== "manager") {
+        throw new ApiError(403, "Only managers can access employee details");
+    }
 
+    const employeeExists = await User.findById(employeeId).select("_id isActive");
+    if (!employeeExists || !employeeExists.isActive) {
+        throw new ApiError(404, "Employee does not exist or is inactive");
+    }
 
-export { registerUser, loginUser, logoutUser, refreshAccessToken, getProfile, forgotPassword, resetPassword, updateUserDetails, updateUsersProfile, changePassword, softdeactivateAccount, getUserById, updateUserRole, searchUsers, getAllUsersWhoseRoleIsEmployee , getAllUsersWhoseRoleIsManagerAndEmployee };
+    const employeeInfo = await Team.aggregate([
+        {
+            $match: {
+                managerId: new mongoose.Types.ObjectId(manager._id),
+                employeeIds: new mongoose.Types.ObjectId(employeeId),
+                isActive: true,
+            }
+        },
+        {
+            $lookup: {
+                from: "users",
+                let: { empIds: "$employeeIds" },
+                pipeline: [
+                    {
+                        $match: {
+                            $expr: {
+                                $and: [
+                                    { $in: ["$_id", "$$empIds"] },
+                                    { $eq: ["$_id", new mongoose.Types.ObjectId(employeeId)] }
+                                ]
+                            }
+                        }
+                    },
+                    {
+                        $project: {
+                            name: 1,
+                            email: 1,
+                            role: 1,
+                            isActive: 1,
+                            userProfile: 1
+                        }
+                    }
+                ],
+                as: "employeeDetails"
+            }
+        },
+        {
+            $addFields: {
+                employee: { $arrayElemAt: ["$employeeDetails", 0] }
+            }
+        },
+        {
+            $project: {
+                teamName: 1,
+                employee: 1
+            }
+        }
+    ]);
+
+    if (!employeeInfo || employeeInfo.length === 0) {
+        throw new ApiError(404, "Employee not found in your team or unauthorized access");
+    }
+
+    return res
+        .status(200)
+        .json(new ApiResponse(200, employeeInfo, "Successfully retrieved employee details"));
+});
+
+const getUserManagerDetails = asyncHandler(async (req, res) => {
+    const admin = req.user;
+    const { managerId } = req.params;
+
+    if (admin.role !== "admin") {
+        throw new ApiError(403, "Only admins can access manager details");
+    }
+
+    if (!managerId || !mongoose.isValidObjectId(managerId)) {
+        throw new ApiError(400, "Invalid or missing managerId");
+    }
+
+    const managerInfo = await Team.aggregate([
+        {
+            $match: {
+                managerId: new mongoose.Types.ObjectId(managerId),
+                isActive: true,
+            },
+        },
+        {
+            $lookup: {
+                from: "users",
+                localField: "managerId",
+                foreignField: "_id",
+                as: "managerDetails",
+                pipeline: [
+                    {
+                        $project: {
+                            name: 1,
+                            email: 1,
+                            userProfile: 1,
+                            role: 1,
+                            isActive: 1,
+                        },
+                    },
+                ],
+            },
+        },
+        { $unwind: "$managerDetails" },
+        {
+            $project: {
+                teamName: 1,
+                manager: "$managerDetails",
+            },
+        },
+    ]);
+
+    if (!managerInfo || managerInfo.length === 0) {
+        throw new ApiError(404, "No active team found for this manager");
+    }
+
+    res.status(200).json(
+        new ApiResponse(200, managerInfo[0], "Manager details retrieved successfully")
+    );
+});
+
+export { registerUser, loginUser, logoutUser, refreshAccessToken, getProfile, forgotPassword, resetPassword, updateUserDetails, updateUsersProfile, changePassword, softdeactivateAccount, getUserById, updateUserRole, searchUsers, getAllUsersWhoseRoleIsEmployee, getAllUsersWhoseRoleIsManagerAndEmployee , getUserEmployeeDetails , getUserManagerDetails };
