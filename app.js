@@ -23,9 +23,11 @@ import { router } from "./src/routes/users.routes.js";
 import { teamrouter } from "./src/routes/teams.routes.js";
 import {feedbackRouter} from "./src/routes/feedback.routes.js";
 import { feedbackHistoryRouter } from "./src/routes/feedbackHistory.routes.js";
+import { dashboardRouter } from "./src/routes/dashboard.routes.js";
 
 app.use("/api/v1/users" , router);
 app.use("/api/v1/team" , teamrouter);
 app.use("/api/v1/feedback" , feedbackRouter);
 app.use("/api/v1/feedbackHistory" , feedbackHistoryRouter);
+app.use("/api/v1/dashboard" , dashboardRouter);
 export {app};

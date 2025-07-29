@@ -1,6 +1,6 @@
 import {Router} from "express";
 import { verifyJwt } from "../middlewares/auth.middleware.js";
-import {createTeam , addTeamEmployees , removeEmployeeFromTeam  , getMyTeams  , getTeamDetailsById , updateTeamDetails , softDeleteTeam , makeIsActiveForTeam , getTeamMembers , transferEmployee , replaceTeamManager , getEmployeeTeam , getAvailableEmployees}  from "../controllers/teams.controllers.js";
+import {createTeam , addTeamEmployees , removeEmployeeFromTeam  , getMyTeams  , getTeamDetailsById , updateTeamDetails , softDeleteTeam , makeIsActiveForTeam , getTeamMembers , transferEmployee , replaceTeamManager , getEmployeeTeam , getAvailableEmployees , getAvailableManagers}  from "../controllers/teams.controllers.js";
 
 const teamrouter = Router();
 
@@ -27,4 +27,8 @@ teamrouter.route("/getEmployeeTeam/:employeeId").get(verifyJwt , getEmployeeTeam
 teamrouter.route("/replaceManager/:teamId").patch(verifyJwt , replaceTeamManager);
 
 teamrouter.route("/transferEmployee").patch(verifyJwt , transferEmployee);
+
+teamrouter.route("/availableEmployees").get(verifyJwt , getAvailableEmployees);
+
+teamrouter.route("/availableManagers").get(verifyJwt , getAvailableManagers);
 export {teamrouter};

@@ -984,4 +984,4 @@ const getUserManagerDetails = asyncHandler(async (req, res) => {
     );
 });
 
-export { registerUser, loginUser, logoutUser, refreshAccessToken, getProfile, forgotPassword, resetPassword, updateUserDetails, updateUsersProfile, changePassword, softdeactivateAccount, getUserById, updateUserRole, searchUsers, getAllUsersWhoseRoleIsEmployee, getAllUsersWhoseRoleIsManagerAndEmployee , getUserEmployeeDetails , getUserManagerDetails };
+export { registerUser, loginUser, logoutUser, refreshAccessToken, getProfile, forgotPassword, resetPassword, updateUserDetails, updateUsersProfile, changePassword, softdeactivateAccount, getUserById, updateUserRole, searchUsers, getAllUsersWhoseRoleIsEmployee, getAllUsersWhoseRoleIsManagerAndEmployee, getUserEmployeeDetails, getUserManagerDetails };

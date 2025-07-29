@@ -884,7 +884,7 @@ async function validateTransfersWithAggregation(transfers) {
     const teamMap = new Map(validationData.teams.map(team => [team._id.toString(), team]));
     const sourceTeamMap = new Map(validationData.sourceTeams.map(team => [team._id.toString(), team]));
     const destinationTeamMap = new Map(validationData.destinationTeams.map(team => [team._id.toString(), team]));
-    
+
     const missingSourceTeams = sourceTeamIds.filter(id => !sourceTeamMap.has(id.toString()));
     const missingDestinationTeams = destinationTeamIds.filter(id => !destinationTeamMap.has(id.toString()));
 
@@ -919,9 +919,9 @@ async function validateTransfersWithAggregation(transfers) {
         // Check if employee is already in destination team
         if (destinationTeam.employeeIdStrings.includes(employeeIdStr)) {
             // Get name from destination if available, otherwise from source
-            const employeeName = destinationTeam.employeeMap?.[employeeIdStr]?.name || 
-                                sourceTeam.employeeMap?.[employeeIdStr]?.name || 
-                                "Unknown";
+            const employeeName = destinationTeam.employeeMap?.[employeeIdStr]?.name ||
+                sourceTeam.employeeMap?.[employeeIdStr]?.name ||
+                "Unknown";
             validationErrors.push(`Employee ${employeeName} is already in destination team ${destinationTeam.teamName}`);
             return;
         }
@@ -951,7 +951,7 @@ function organizeOptimizedTransferGroups(transfers) {
 
     transfers.forEach(transfer => {
         const key = `${transfer.sourceTeamId}-${transfer.destinationTeamId}`;
-        
+
         if (!groups.has(key)) {
             groups.set(key, {
                 sourceTeamId: new mongoose.Types.ObjectId(transfer.sourceTeamId),
@@ -959,7 +959,7 @@ function organizeOptimizedTransferGroups(transfers) {
                 employeeIds: []
             });
         }
-        
+
         groups.get(key).employeeIds.push(new mongoose.Types.ObjectId(transfer.employeeId));
     });
 
@@ -973,23 +973,23 @@ function organizeOptimizedTransferGroups(transfers) {
 
 async function executeOptimizedTransferWithRetry(transferGroups, adminId, batchId, metadata) {
     let lastError;
-    
+
     for (let attempt = 1; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
         try {
             return await executeOptimizedAtomicTransfer(transferGroups, adminId, batchId, metadata);
         } catch (error) {
             lastError = error;
-            
+
             if (error instanceof ApiError || !isTransientError(error)) {
                 throw error;
             }
-            
+
             if (attempt < MAX_RETRY_ATTEMPTS) {
                 await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
             }
         }
     }
-    
+
     throw new ApiError(500, `Transfer failed after ${MAX_RETRY_ATTEMPTS} attempts: ${lastError.message}`);
 }
 
@@ -1003,16 +1003,16 @@ async function executeOptimizedAtomicTransfer(transferGroups, adminId, batchId, 
             throw new ApiError(408, "Transfer operation timed out");
         }, TRANSACTION_TIMEOUT);
 
-       
+
         const preTransferState = await captureTeamStatesOptimized(transferGroups, session);
 
-    
+
         const transferResults = await executeBulkTransfers(transferGroups, session, metadata);
 
-        
+
         await verifyTransferConsistencyOptimized(transferGroups, session);
 
-       
+
         await createOptimizedAuditTrail(batchId, adminId, transferGroups, preTransferState, session);
 
         clearTimeout(timeout);
@@ -1020,7 +1020,7 @@ async function executeOptimizedAtomicTransfer(transferGroups, adminId, batchId, 
 
         const totalTransfers = transferGroups.reduce((sum, group) => sum + group.employeeIds.length, 0);
         const affectedTeams = new Set(transferGroups.flatMap(g => [g.sourceTeamId.toString(), g.destinationTeamId.toString()]));
-        
+
         return {
             batchId,
             totalTransfers,
@@ -1029,7 +1029,7 @@ async function executeOptimizedAtomicTransfer(transferGroups, adminId, batchId, 
             completedAt: new Date().toISOString(),
             performanceMetrics: {
                 transferGroupsProcessed: transferGroups.length,
-                bulkOperationsExecuted: transferGroups.length * 2 
+                bulkOperationsExecuted: transferGroups.length * 2
             }
         };
 
@@ -1046,31 +1046,31 @@ async function executeBulkTransfers(transferGroups, session, metadata) {
     const bulkAddOps = [];
     const transferResults = [];
 
-  
+
     transferGroups.forEach(group => {
         const { sourceTeamId, destinationTeamId, employeeIds } = group;
         const sourceTeam = metadata.teamMap.get(sourceTeamId.toString());
         const destinationTeam = metadata.teamMap.get(destinationTeamId.toString());
 
-      
+
         bulkRemoveOps.push({
             updateOne: {
-                filter: { 
+                filter: {
                     _id: sourceTeamId,
                     employeeIds: { $in: employeeIds }
                 },
-                update: { 
+                update: {
                     $pull: { employeeIds: { $in: employeeIds } },
                     $set: { updatedAt: new Date() }
                 }
             }
         });
 
-       
+
         bulkAddOps.push({
             updateOne: {
                 filter: { _id: destinationTeamId },
-                update: { 
+                update: {
                     $addToSet: { employeeIds: { $each: employeeIds } },
                     $set: { updatedAt: new Date() }
                 }
@@ -1085,13 +1085,13 @@ async function executeBulkTransfers(transferGroups, session, metadata) {
         });
     });
 
-   
+
     const [removeResults, addResults] = await Promise.all([
         Team.bulkWrite(bulkRemoveOps, { session, ordered: false }),
         Team.bulkWrite(bulkAddOps, { session, ordered: false })
     ]);
 
-  
+
     if (removeResults.modifiedCount !== transferGroups.length) {
         throw new ApiError(500, `Bulk remove operation failed. Expected: ${transferGroups.length}, Modified: ${removeResults.modifiedCount}`);
     }
@@ -1105,7 +1105,7 @@ async function executeBulkTransfers(transferGroups, session, metadata) {
 
 async function captureTeamStatesOptimized(transferGroups, session) {
     const teamIds = [...new Set(transferGroups.flatMap(g => [g.sourceTeamId, g.destinationTeamId]))];
-    
+
     const [stateData] = await Team.aggregate([
         {
             $match: { _id: { $in: teamIds } }
@@ -1242,16 +1242,16 @@ function isTransientError(error) {
         'ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED',
         11600, 11602, 13436, 13435, 189, 91, 7, 6, 89
     ];
-    
-    return transientErrorCodes.includes(error.code) || 
-           error.name === 'MongoTimeoutError' ||
-           error.name === 'MongoNetworkError' ||
-           error.name === 'MongoServerError' ||
-           (error.message && (
-               error.message.includes('transaction') ||
-               error.message.includes('timeout') ||
-               error.message.includes('connection')
-           ));
+
+    return transientErrorCodes.includes(error.code) ||
+        error.name === 'MongoTimeoutError' ||
+        error.name === 'MongoNetworkError' ||
+        error.name === 'MongoServerError' ||
+        (error.message && (
+            error.message.includes('transaction') ||
+            error.message.includes('timeout') ||
+            error.message.includes('connection')
+        ));
 }
 
 const replaceTeamManager = asyncHandler(async (req, res) => {
@@ -1462,5 +1462,79 @@ const getEmployeeTeam = asyncHandler(async (req, res) => {
 })
 
 const getAvailableEmployees = asyncHandler(async (req, res) => {
+    const requester = req.user;
+    if (requester.role !== "admin" && requester.role !== "manager") {
+        throw new ApiError(403, "Only admin or manager can access available employees");
+    }
+    const teams = await Team.aggregate([
+        {
+            $match: {
+                isActive: true,
+                employeeIds: { $exists: true, $ne: [] },
+            },
+        },
+        {
+            $project: {
+                employeeIds: 1,
+            },
+        },
+    ]);
+
+    const assignedEmployeeIds = teams.flatMap(team => team.employeeIds.map(id => id.toString()));
+
+    const availableEmployees = await User.find({
+        role: "employee",
+        isActive: true,
+        _id: { $nin: assignedEmployeeIds },
+    }).select("name email userProfile isActive");
+
+    if (availableEmployees.length === 0) {
+        return res.status(200).json(
+            new ApiResponse(200, availableEmployees, "All employees are already assigned to teams. No available employees found.")
+        );
+    }
+
+    res.status(200).json(
+        new ApiResponse(200, availableEmployees, "Successfully fetched available employees")
+    );
+});
+
+const getAvailableManagers = asyncHandler(async(req , res)=>{
+    const admin = req.user;
+    if(admin.role !== "admin"){
+        throw new ApiError(400 , "only admin can access the available managers");
+    }
+    const teams = await Team.aggregate([
+        {
+            $match : {
+                isActive: true,
+                managerId: { $exists: true, $ne: [] },
+            }
+        },
+        {
+            $project : {
+                managerId : 1,
+            }
+        }
+    ]);
+
+    const assignedManagerId = teams.flatMap(team => team.managerId.toString());
+
+    const availableManager = await User.find({
+        role : "manager",
+        isActive : true,
+        _id : {$nin : assignedManagerId},
+    }).select("name email userProfile isActive");
+
+
+    if (availableManager.length === 0) {
+        return res.status(200).json(
+            new ApiResponse(200, availableManager, "All managers are already assigned to teams. No available managers found.")
+        );
+    }
+     res.status(200).json(
+        new ApiResponse(200, availableManager, "Successfully fetched available managers")
+    );
+
 })
-export { createTeam, addTeamEmployees, removeEmployeeFromTeam, getMyTeams, getTeamDetailsById, updateTeamDetails, softDeleteTeam, makeIsActiveForTeam, getTeamMembers, transferEmployee, replaceTeamManager, getEmployeeTeam, getAvailableEmployees };
+export { createTeam, addTeamEmployees, removeEmployeeFromTeam, getMyTeams, getTeamDetailsById, updateTeamDetails, softDeleteTeam, makeIsActiveForTeam, getTeamMembers, transferEmployee, replaceTeamManager, getEmployeeTeam, getAvailableEmployees , getAvailableManagers };
