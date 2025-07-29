@@ -694,16 +694,22 @@ const transferEmployee = asyncHandler(async (req, res) => {
     const adminId = req.user._id;
     const batchId = uuidv4();
     validateTransferInput(transfers);
+
     await validateAdminPermission(adminId);
+
     const validationResult = await validateTransfersWithAggregation(transfers);
+
     const result = await executeOptimizedTransferWithRetry(
         validationResult.transferGroups,
         adminId,
         batchId,
-        validationResult.metaData
+        validationResult.metadata
     );
-    res.status(200).json(new ApiResponse(200, result, "Employee transfers completed successfully"));
-})
+
+    return res.status(200).json(
+        new ApiResponse(200, result, "Employee transfers completed successfully")
+    );
+});
 
 function validateTransferInput(transfers) {
     if (!Array.isArray(transfers) || transfers.length === 0) {
