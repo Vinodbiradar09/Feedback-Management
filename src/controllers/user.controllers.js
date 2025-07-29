@@ -856,7 +856,7 @@ const getUserEmployeeDetails = asyncHandler(async(req , res)=>{
 })
 
 const getUserManagerDetails = asyncHandler(async(req, res)=>{
-
+    
 })
 
 
