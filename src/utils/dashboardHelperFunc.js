@@ -11,6 +11,7 @@ import mongoose from "mongoose";
 const RECENT_ACTIVITY_LIMIT = 20;
 const TOP_EMPLOYEES_LIMIT = 10;
 const DAILY_TREND_DAYS = 30;
+
 async function getManagerTeams(managerId) {
     const teams = await Team.aggregate([
         {
@@ -29,7 +30,7 @@ async function getManagerTeams(managerId) {
                     {
                         $match: {
                             isActive: true,
-                            role: 'employees'
+                            role: 'employee'
                         }
                     },
                     {
@@ -45,11 +46,17 @@ async function getManagerTeams(managerId) {
         },
         {
             $addFields: {
-                activeEmployeeCount: { $size: "$emloyees" },
+                activeEmployeeCount: {
+                    $size: {
+                        $ifNull: ["$employees", []]
+                    }
+                },
                 recentlyActiveCount: {
                     $size: {
                         $filter: {
-                            input: "$emloyees",
+                            input: {
+                                $ifNull: ["$employees", []]
+                            },
                             cond: {
                                 $gte: [
                                     "$$this.lastLogin",
@@ -61,6 +68,7 @@ async function getManagerTeams(managerId) {
                 }
             }
         },
+
         {
             $project: {
                 teamName: 1,
@@ -239,7 +247,7 @@ async function generateFeedbackAnalytics(managerId, allEmployeeIds, startDate, d
                 acknowledgmentRate: emp.feedbackCount > 0 ?
                     parseFloat(((emp.acknowledgedCount / emp.feedbackCount) * 100).toFixed(1)) : 0,
                 latestFeedback: emp.latestFeedback,
-                sentimentBreakdown: emp.sentiment.reduce((acc, sentiment) => {
+                sentimentBreakdown: emp.sentiments.reduce((acc, sentiment) => {
                     acc[sentiment] = (acc[sentiment] || 0) + 1;
                     return acc;
                 }, { positive: 0, neutral: 0, negative: 0 })
@@ -392,7 +400,14 @@ async function generateEmployeeMetrics(allEmployeeIds) {
 }
 
 async function generateTeamOverview(managerTeams) {
-    const totalEmployees = managerTeams.reduce((sum, team) => sum + team.activeEmployeeCount, 0);
+    const totalEmployees = managerTeams.reduce(
+        (sum, team) => sum + (team.activeEmployeeCount || 0),
+        0
+    );
+    if (!totalEmployees) {
+        console.log("team" , managerTeams);
+        console.log("managers", totalEmployees);
+    }
     const totalRecentlyActive = managerTeams.reduce((sum, team) => sum + team.recentlyActiveCount, 0);
 
     return {
@@ -411,9 +426,7 @@ async function generateTeamOverview(managerTeams) {
                 isRecentlyActive: emp.lastLogin &&
                     (new Date() - new Date(emp.lastLogin)) <= (7 * 24 * 60 * 60 * 1000)
             }))
-
         })),
-
         summary: {
             totalTeams: managerTeams.length,
             totalEmployees,
@@ -477,8 +490,8 @@ async function generateRecentActivity(managerId, allEmployeeIds) {
     ]);
 
     return {
-        activities : recentActivities,
-        totalActivities : recentActivities.length,
+        activities: recentActivities,
+        totalActivities: recentActivities.length,
         timeRange: "Last 30 days"
     }
 }
@@ -486,24 +499,24 @@ async function generateRecentActivity(managerId, allEmployeeIds) {
 async function generatePerformanceInsights(allEmployeeIds, includeDetailed) {
     const performanceData = await Feedback.aggregate([
         {
-            $match : {
-                toEmployeeId : {$in : allEmployeeIds},
-                isDeleted : false,
+            $match: {
+                toEmployeeId: { $in: allEmployeeIds },
+                isDeleted: false,
             }
         },
         {
-            $group : {
-                _id : "$toEmployeeId",
-                totalFeedback : {$sum : 1},
-                positiveFeedback : {
-                    $sum : { $cond : [{ $eq : ["$sentiment" , "positive"]} , 1 , 0]}
+            $group: {
+                _id: "$toEmployeeId",
+                totalFeedback: { $sum: 1 },
+                positiveFeedback: {
+                    $sum: { $cond: [{ $eq: ["$sentiment", "positive"] }, 1, 0] }
                 },
-                acknowledgedCount : {
-                    $sum : { $cond : ["$isAcknowledged" , 1 ,0]}
+                acknowledgedCount: {
+                    $sum: { $cond: ["$isAcknowledged", 1, 0] }
                 },
-                averageResponseTime : {
-                    $avg : {
-                        $cond : [
+                averageResponseTime: {
+                    $avg: {
+                        $cond: [
                             "$isAcknowledged",
                             {
                                 $divide: [
@@ -518,9 +531,9 @@ async function generatePerformanceInsights(allEmployeeIds, includeDetailed) {
             }
         },
         {
-            $addFields : {
-                positiveRatio : {
-                    $cond : [
+            $addFields: {
+                positiveRatio: {
+                    $cond: [
                         { $gt: ["$totalFeedback", 0] },
                         { $divide: ["$positiveFeedback", "$totalFeedback"] },
                         0
@@ -535,22 +548,30 @@ async function generatePerformanceInsights(allEmployeeIds, includeDetailed) {
                 },
                 performanceScore: {
                     $add: [
-                        { $multiply: [
-                            { $cond: [
-                                { $gt: ["$totalFeedback", 0] },
-                                { $divide: ["$positiveFeedback", "$totalFeedback"] },
-                                0
-                            ]}, 
-                            0.6
-                        ]},
-                        { $multiply: [
-                            { $cond: [
-                                { $gt: ["$totalFeedback", 0] },
-                                { $divide: ["$acknowledgedCount", "$totalFeedback"] },
-                                0
-                            ]}, 
-                            0.4
-                        ]}
+                        {
+                            $multiply: [
+                                {
+                                    $cond: [
+                                        { $gt: ["$totalFeedback", 0] },
+                                        { $divide: ["$positiveFeedback", "$totalFeedback"] },
+                                        0
+                                    ]
+                                },
+                                0.6
+                            ]
+                        },
+                        {
+                            $multiply: [
+                                {
+                                    $cond: [
+                                        { $gt: ["$totalFeedback", 0] },
+                                        { $divide: ["$acknowledgedCount", "$totalFeedback"] },
+                                        0
+                                    ]
+                                },
+                                0.4
+                            ]
+                        }
                     ]
                 }
             }
@@ -560,14 +581,14 @@ async function generatePerformanceInsights(allEmployeeIds, includeDetailed) {
     ]);
 
     let processedPerformanceData = performanceData;
-    if(includeDetailed){
+    if (includeDetailed) {
         const employeeIds = performanceData.map(emp => emp._id);
         const employees = await User.find({
-            _id : {$in : employeeIds},
-             role: 'employee'
+            _id: { $in: employeeIds },
+            role: 'employee'
         }).select("name email userProfile").lean();
 
-        const employeeMap = employees.reduce((map , emp)=>{
+        const employeeMap = employees.reduce((map, emp) => {
             map[emp._id.toString()] = emp;
             return map;
         }, {});
@@ -575,27 +596,27 @@ async function generatePerformanceInsights(allEmployeeIds, includeDetailed) {
         processedPerformanceData = performanceData.map(emp => {
             const employee = employeeMap[emp._id.toString()];
             return {
-                employee : employee ? {
-                    _id : employee._id,
-                    name : employee.name,
-                    email : employee.email,
-                    userProfile : employee.userProfile,
+                employee: employee ? {
+                    _id: employee._id,
+                    name: employee.name,
+                    email: employee.email,
+                    userProfile: employee.userProfile,
 
                 } : null,
-                totalFeedback : emp.totalFeedback,
+                totalFeedback: emp.totalFeedback,
                 positiveFeedback: emp.positiveFeedback,
                 acknowledgedCount: emp.acknowledgedCount,
                 acknowledgmentRate: Math.round(emp.acknowledgmentRate * 100 * 10) / 10,
                 positiveRatio: Math.round(emp.positiveRatio * 100 * 10) / 10,
                 performanceScore: Math.round(emp.performanceScore * 100 * 10) / 10,
-                averageResponseTime: emp.averageResponseTime ? 
+                averageResponseTime: emp.averageResponseTime ?
                     Math.round(emp.averageResponseTime * 10) / 10 : null
             };
-        }); 
+        });
     } else {
         processedPerformanceData = performanceData.map(emp => ({
-            employeeId : emp._id,
-            totalFeedback : emp.totalFeedback,
+            employeeId: emp._id,
+            totalFeedback: emp.totalFeedback,
             performanceScore: Math.round(emp.performanceScore * 100 * 10) / 10,
             acknowledgmentRate: Math.round(emp.acknowledgmentRate * 100 * 10) / 10
         }));
@@ -608,4 +629,4 @@ async function generatePerformanceInsights(allEmployeeIds, includeDetailed) {
     };
 }
 
-export { getManagerTeams, generateFeedbackAnalytics, generateEmployeeMetrics , generateTeamOverview,generateRecentActivity , generatePerformanceInsights};
+export { getManagerTeams, generateFeedbackAnalytics, generateEmployeeMetrics, generateTeamOverview, generateRecentActivity, generatePerformanceInsights };
