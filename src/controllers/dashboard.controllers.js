@@ -6,53 +6,53 @@ import { Team } from "../models/teams.model.js";
 import { Feedback } from "../models/feedback.model.js";
 import { Feedbackhistory } from "../models/feedbackHistory.model.js";
 import NodeCache from "node-cache";
-import { getManagerTeams , generateFeedbackAnalytics , generateEmployeeMetrics , generateRecentActivity , generatePerformanceInsights , generateTeamOverview} from "../utils/dashboardHelperFunc.js";
+import { getManagerTeams, generateFeedbackAnalytics, generateEmployeeMetrics, generateRecentActivity, generatePerformanceInsights, generateTeamOverview, getEmployeeTeamInfo, generateFeedbackOverview, generateFeedbackHistory, generatePerformanceMetrics, generateTeamComparison, generatePerformanceTrends , generateAcknowledgmentStats} from "../utils/dashboardHelperFunc.js";
 
-const dashboardCache = new NodeCache ({stdTTL : 300 , checkperiod : 60});
+const dashboardCache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
 
 const RECENT_ACTIVITY_LIMIT = 20;
 const TOP_EMPLOYEES_LIMIT = 10;
 const DAILY_TREND_DAYS = 30;
 
-const getManagerDashboard = asyncHandler(async(req , res)=>{
+const getManagerDashboard = asyncHandler(async (req, res) => {
     const manager = req.user;
-    const { 
-        timeRange = '30', 
+    const {
+        timeRange = '30',
         includeDetailedStats = 'false',
-        includeRecentActivity = 'true' 
+        includeRecentActivity = 'true'
     } = req.query;
 
-    if(!manager || manager.role !== "manager"){
+    if (!manager || manager.role !== "manager") {
         throw new ApiError(403, 'Only managers can access dashboard data');
     }
 
-    if(!manager.isActive){
-        throw new ApiError(402 , "Only Active managers can access the dashboard");
+    if (!manager.isActive) {
+        throw new ApiError(402, "Only Active managers can access the dashboard");
     }
     const cacheKey = `manager_dashboard_${manager._id}_${timeRange}_${includeDetailedStats}_${includeRecentActivity}`;
     const cachedData = dashboardCache.get(cacheKey);
 
-    if(cachedData){
+    if (cachedData) {
         console.log(`Cache hit for manager dashboard: ${manager._id}`);
-        return res.status(200).json(new ApiResponse(200 , cachedData , 'Manager dashboard data retrieved successfully (cached)'));
+        return res.status(200).json(new ApiResponse(200, cachedData, 'Manager dashboard data retrieved successfully (cached)'));
     }
 
     console.log(`Cache miss for manager dashboard: ${manager._id}, generating fresh data...`);
 
     try {
-       const managerTeams = await getManagerTeams(manager._id);
-       
-       if(!managerTeams || managerTeams.length === 0){
-         throw new ApiError(404, "No active teams found for this manager");
-       }
+        const managerTeams = await getManagerTeams(manager._id);
+
+        if (!managerTeams || managerTeams.length === 0) {
+            throw new ApiError(404, "No active teams found for this manager");
+        }
 
         const now = new Date();
         const daysBack = parseInt(timeRange);
         const startDate = new Date(now.getTime() - (daysBack * 24 * 60 * 60 * 1000));
 
         const allEmployeeIds = managerTeams.flatMap(team => team.employeeIds);
-        if(!allEmployeeIds || allEmployeeIds.length === 0){
-            throw new ApiError(400 , "allEmployeeIds not found");
+        if (!allEmployeeIds || allEmployeeIds.length === 0) {
+            throw new ApiError(400, "allEmployeeIds not found");
         }
 
         const [
@@ -65,23 +65,23 @@ const getManagerDashboard = asyncHandler(async(req , res)=>{
             generateFeedbackAnalytics(manager._id, allEmployeeIds, startDate, daysBack, includeDetailedStats === 'true'),
             generateEmployeeMetrics(allEmployeeIds),
             generateTeamOverview(managerTeams),
-            includeRecentActivity === 'true' ? generateRecentActivity(manager._id , allEmployeeIds) : Promise.resolve(null),
-            generatePerformanceInsights(allEmployeeIds , includeDetailedStats === "true")
+            includeRecentActivity === 'true' ? generateRecentActivity(manager._id, allEmployeeIds) : Promise.resolve(null),
+            generatePerformanceInsights(allEmployeeIds, includeDetailedStats === "true")
         ]);
 
         const responseData = {
-            manager : {
-                _id : manager._id,
-                name : manager.name,
-                email : manager.email,
-                userProfile : manager.userProfile
+            manager: {
+                _id: manager._id,
+                name: manager.name,
+                email: manager.email,
+                userProfile: manager.userProfile
             },
-             timeRange: {
+            timeRange: {
                 days: daysBack,
                 startDate: startDate.toISOString(),
                 endDate: now.toISOString()
             },
-            overview : {
+            overview: {
                 totalTeams: managerTeams.length,
                 totalEmployees: allEmployeeIds.length,
                 totalFeedback: feedbackAnalytics.summary.totalFeedback,
@@ -93,7 +93,7 @@ const getManagerDashboard = asyncHandler(async(req , res)=>{
             teamOverview,
             employeeMetrics,
             feedbackAnalytics,
-            ...(recentActivity && {recentActivity}),
+            ...(recentActivity && { recentActivity }),
             performanceInsights,
             metadata: {
                 lastUpdated: new Date().toISOString(),
@@ -120,14 +120,101 @@ const getManagerDashboard = asyncHandler(async(req , res)=>{
         if (error instanceof ApiError) {
             throw error;
         }
-        
+
+        throw new ApiError(500, 'Failed to retrieve dashboard data. Please try again later.');
+    }
+});
+
+const employeeDashboardCache = new NodeCache({ stdTTL: 180, checkperiod: 30 });
+
+const CONFIG = {
+    RECENT_FEEDBACK_LIMIT: 15,
+    FEEDBACK_HISTORY_DAYS: 90,
+    PERFORMANCE_TREND_MONTHS: 6,
+    CACHE_TTL: 180,
+    MAX_TIME_RANGE_DAYS: 365,
+    DEFAULT_TIME_RANGE: 30
+};
+
+const getEmployeeDashboard = asyncHandler(async (req, res) => {
+    const {
+        timeRange = CONFIG.DEFAULT_TIME_RANGE.toString(),
+        includeFeedbackHistory = 'true',
+        includeTeamComparison = 'false',
+        includePerformanceTrends = 'true'
+    } = req.query;
+
+    const employee = req.user;
+
+    if (!employee || employee.role !== "employee") {
+        throw new ApiError(400, "Only employees can access the employees dashboard data");
+    }
+
+    if (!employee.isActive) {
+        throw new ApiError(400, "The employee must be active to access the dashboard");
+    }
+    const daysBack = parseInt(timeRange);
+    if (isNaN(daysBack) || daysBack < 1 || daysBack > CONFIG.MAX_TIME_RANGE_DAYS) {
+        throw new ApiError(400, `Time range must be between 1 and ${CONFIG.MAX_TIME_RANGE_DAYS} days`);
+    }
+    const cacheKey = `employee_dashboard_${employee._id}_${timeRange}_${includeFeedbackHistory}_${includeTeamComparison}_${includePerformanceTrends}`;
+    const cachedData = employeeDashboardCache.get(cacheKey);
+
+    if (cachedData) {
+        console.log(`Cache hit for employee dashboard: ${employee._id}`);
+
+        return res.status(200).json(new ApiResponse(200, cachedData, 'Employee dashboard data retrieved successfully (cached)'));
+    }
+
+    console.log(`Cache miss for employee dashboard: ${employee._id}, generating fresh data...`);
+
+    try {
+
+        const now = new Date();
+        const startDate = new Date(now.getTime() - (daysBack * 24 * 60 * 60 * 1000));
+
+        const employeeTeam = await getEmployeeTeamInfo(employee._id);
+        const [
+            feedbackOverview,
+            feedbackHistory,
+            performanceMetrics,
+            teamComparison,
+            performanceTrends,
+            acknowledgmentStats,
+            managerInsights,
+            goalProgress
+        ] = await Promise.allSettled([
+            generateFeedbackOverview(employee._id, startDate, daysBack),
+            includeFeedbackHistory === 'true' ?
+                generateFeedbackHistory(employee._id, CONFIG.FEEDBACK_HISTORY_DAYS) :
+                Promise.resolve(null),
+            generatePerformanceMetrics(employee._id, startDate),
+            includeTeamComparison === 'true' && employeeTeam ?
+                generateTeamComparison(employee._id, employeeTeam._id, startDate) :
+                Promise.resolve(null),
+            includePerformanceTrends === 'true' ?
+                generatePerformanceTrends(employee._id, CONFIG.PERFORMANCE_TREND_MONTHS) :
+                Promise.resolve(null),
+                
+        ])
+
+    } catch (error) {
+        console.error('Employee dashboard error:', {
+            employeeId: employee._id,
+            email: employee.email,
+            error: error.message,
+            stack: error.stack,
+            timestamp: new Date().toISOString(),
+            timeRange: daysBack
+        });
+
+        if (error instanceof ApiError) {
+            throw error;
+        }
+
         throw new ApiError(500, 'Failed to retrieve dashboard data. Please try again later.');
     }
 });
 
 
-const getEmployeeDashboard = asyncHandler(async(req , res)=>{
-
-})
-
-export {getManagerDashboard , getEmployeeDashboard};
+export { getManagerDashboard, getEmployeeDashboard };
