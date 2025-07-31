@@ -54,7 +54,7 @@ Create a `.env` file in the root directory and add the following:
 
 ```env
 PORT=4001
-MONGO_URI=your_mongodb_uri
+MONGO_URI=your_mongodb_uri 
 JWT_SECRET=your_secret
 SMTP_HOST=smtp.example.com
 SMTP_PORT=587
