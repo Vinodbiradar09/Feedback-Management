@@ -6,7 +6,7 @@ import { Team } from "../models/teams.model.js";
 import { Feedback } from "../models/feedback.model.js";
 import { Feedbackhistory } from "../models/feedbackHistory.model.js";
 import NodeCache from "node-cache";
-import { getManagerTeams, generateFeedbackAnalytics, generateEmployeeMetrics, generateRecentActivity, generatePerformanceInsights, generateTeamOverview, getEmployeeTeamInfo, generateFeedbackOverview, generateFeedbackHistory, generatePerformanceMetrics, generateTeamComparison, generatePerformanceTrends , generateAcknowledgmentStats} from "../utils/dashboardHelperFunc.js";
+import { getManagerTeams, generateFeedbackAnalytics, generateEmployeeMetrics, generateRecentActivity, generatePerformanceInsights, generateTeamOverview, getEmployeeTeamInfo, generateFeedbackOverview, generateFeedbackHistory, generatePerformanceMetrics, generateTeamComparison, generatePerformanceTrends, generateAcknowledgmentStats , generateManagerInsights , handlePromiseResults , getTimeRangeDescription , calculateFeedbackVelocity , extractTopStrengths ,assessDataQuality , generateRecommendations , calculateEmployeeHealthScore , generateGoalProgress} from "../utils/dashboardHelperFunc.js";
 
 const dashboardCache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
 
@@ -195,8 +195,83 @@ const getEmployeeDashboard = asyncHandler(async (req, res) => {
             includePerformanceTrends === 'true' ?
                 generatePerformanceTrends(employee._id, CONFIG.PERFORMANCE_TREND_MONTHS) :
                 Promise.resolve(null),
-                
-        ])
+            generateAcknowledgmentStats(employee._id, startDate),
+            generateManagerInsights(employee._id, startDate),
+            generateGoalProgress(employee._id, startDate)
+        ]);
+
+         const results = handlePromiseResults([
+            feedbackOverview,
+            feedbackHistory,
+            performanceMetrics,
+            teamComparison,
+            performanceTrends,
+            acknowledgmentStats,
+            managerInsights,
+            goalProgress
+        ]);
+
+        const responseData = {
+            employee: {
+                _id: employee._id,
+                name: employee.name,
+                email: employee.email,
+                userProfile: employee.userProfile,
+                lastLogin: employee.lastLogin
+            },
+            team: employeeTeam,
+            timeRange: {
+                days: daysBack,
+                startDate: startDate.toISOString(),
+                endDate: now.toISOString(),
+                description: getTimeRangeDescription(daysBack)
+            },
+            overview: {
+                totalFeedbackReceived: results[0]?.totalFeedback || 0,
+                acknowledgedFeedback: results[0]?.acknowledgedFeedback || 0,
+                pendingFeedback: results[0]?.pendingFeedback || 0,
+                acknowledgmentRate: results[0]?.acknowledgmentRate || 0,
+                averageResponseTime: results[0]?.averageResponseTime || null,
+                recentFeedbackCount: results[0]?.recentFeedbackCount || 0,
+                feedbackVelocity: calculateFeedbackVelocity(results[0], daysBack) // New metric
+            },
+            feedbackAnalytics: {
+                sentimentDistribution: results[0]?.sentimentDistribution || {},
+                dailyTrend: results[0]?.dailyTrend || [],
+                monthlyTrend: results[0]?.monthlyTrend || [],
+                managerFeedbackBreakdown: results[0]?.managerBreakdown || [],
+                topStrengths: extractTopStrengths(results[1]) // New feature
+            },
+            performanceMetrics: results[2] || {},
+            acknowledgmentStats: results[5] || {},
+            managerInsights: results[6] || {},
+            goalProgress: results[7] || null, // New feature
+            ...(results[1] && { feedbackHistory: results[1] }),
+            ...(results[3] && { teamComparison: results[3] }),
+            ...(results[4] && { performanceTrends: results[4] }),
+            recommendations: generateRecommendations(results[0], results[2], results[5], results[7]),
+            healthScore: calculateEmployeeHealthScore(results), // New feature
+            metadata: {
+                lastUpdated: new Date().toISOString(),
+                cacheKey,
+                includeFeedbackHistory: includeFeedbackHistory === 'true',
+                includeTeamComparison: includeTeamComparison === 'true',
+                includePerformanceTrends: includePerformanceTrends === 'true',
+                dataQuality: assessDataQuality(results), // New feature
+                version: '2.0'
+            }
+        };
+
+        try {
+            employeeDashboardCache.set(cacheKey, responseData);
+            console.log(`Employee dashboard data cached for employee: ${employee._id}`);
+        } catch (cacheError) {
+            console.warn('Failed to cache dashboard data:', cacheError.message);
+        }
+
+         res.status(200).json(
+            new ApiResponse(200, responseData, 'Employee dashboard data retrieved successfully')
+        );
 
     } catch (error) {
         console.error('Employee dashboard error:', {
@@ -215,6 +290,7 @@ const getEmployeeDashboard = asyncHandler(async (req, res) => {
         throw new ApiError(500, 'Failed to retrieve dashboard data. Please try again later.');
     }
 });
+
 
 
 export { getManagerDashboard, getEmployeeDashboard };

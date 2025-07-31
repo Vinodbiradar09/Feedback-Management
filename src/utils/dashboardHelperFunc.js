@@ -1836,7 +1836,7 @@ async function generateAcknowledgmentStats(employeeId, startDate) {
     ]);
 
     const [stats] = acknowledgmentData;
-    const overall = stats.overall[0] || {};
+    const overall = stats.overallStats[0] || {};
     const sentimentAck = {};
 
     stats.sentimentAcknowledgment.forEach(sentiment => {
@@ -2021,6 +2021,430 @@ async function generateManagerInsights(employeeId, startDate) {
     };
 }
 
+function generateRecommendations (feedbackOverview, performanceMetrics, acknowledgmentStats, goalProgress){
+    const recommendations = [];
+
+    if(goalProgress?.goals){
+        goalProgress.goals.forEach(goal => {
+            if(goal.status === 'needs_work'){
+                recommendations.push({
+                     type: 'goal',
+                    priority: 'high',
+                    title: `Focus on: ${goal.title}`,
+                    message: `You're at ${goal.current}${goal.unit}, target is ${goal.target}${goal.unit}`,
+                    actionItems: getGoalActionItems(goal.id)
+                });
+            }
+        });
+    }
+
+    if(acknowledgmentStats?.overall?.acknowledgmentRate < 60){
+        recommendations.push({
+            type: 'acknowledgment',
+            priority: 'high',
+            title: 'Improve Feedback Acknowledgment',
+            message: `Your acknowledgment rate is ${acknowledgmentStats.overall.acknowledgmentRate}%. Try to acknowledge feedback within 24-48 hours to show engagement.`,
+            actionItems: [
+                'Set up daily reminders to check for new feedback',
+                'Acknowledge feedback even if you need time to fully process it',
+                'Use the mobile app to quickly acknowledge on-the-go'
+            ]
+        });
+    }
+
+     if (acknowledgmentStats?.overall?.avgResponseTime > 5) {
+        recommendations.push({
+            type: 'response_time',
+            priority: 'medium',
+            title: 'Faster Response Time',
+            message: `Your average response time is ${acknowledgmentStats.overall.avgResponseTime} days. Quicker responses show better engagement.`,
+            actionItems: [
+                'Enable push notifications for new feedback',
+                'Schedule specific times for reviewing feedback',
+                'Consider acknowledging first, then providing detailed responses later'
+            ]
+        });
+    }
+
+     if (performanceMetrics?.trends?.positiveRateChange < -10) {
+        recommendations.push({
+            type: 'performance',
+            priority: 'high',
+            title: 'Address Declining Feedback Sentiment',
+            message: `Your positive feedback rate has decreased by ${Math.abs(performanceMetrics.trends.positiveRateChange)}%. Focus on areas mentioned in recent feedback.`,
+            actionItems: [
+                'Review recent feedback for common improvement areas',
+                'Schedule a one-on-one with your manager to discuss concerns',
+                'Create an action plan to address specific feedback points'
+            ]
+        });
+    }
+
+    if (feedbackOverview?.pendingFeedback > 3) {
+        recommendations.push({
+            type: 'engagement',
+            priority: 'medium',
+            title: 'Address Pending Feedback',
+            message: `You have ${feedbackOverview.pendingFeedback} pending feedback items. Regular engagement shows professionalism.`,
+            actionItems: [
+                'Review and acknowledge the oldest pending feedback first',
+                'Set aside 15 minutes daily for feedback review',
+                'Ask managers for clarification if feedback is unclear'
+            ]
+        });
+    }
+
+     if (acknowledgmentStats?.overall?.acknowledgmentRate >= 80) {
+        recommendations.push({
+            type: 'positive',
+            priority: 'low',
+            title: 'Excellent Engagement!',
+            message: `Great job maintaining an ${acknowledgmentStats.overall.acknowledgmentRate}% acknowledgment rate. Keep up the excellent engagement!`,
+            actionItems: [
+                'Continue your current feedback review routine',
+                'Consider mentoring colleagues on feedback best practices',
+                'Share your engagement strategies with the team'
+            ]
+        });
+    }
+
+     if (performanceMetrics?.currentPeriod?.totalFeedback === 0) {
+        recommendations.push({
+            type: 'feedback_seeking',
+            priority: 'medium',
+            title: 'Seek More Feedback',
+            message: 'You haven\'t received feedback recently. Proactive feedback seeking can accelerate your growth.',
+            actionItems: [
+                'Schedule regular check-ins with your manager',
+                'Ask for specific feedback on recent projects',
+                'Request feedback from cross-functional partners'
+            ]
+        });
+    }
+
+    return recommendations.slice(0 , 5);
+}
+
+function getGoalActionItems(goalId) {
+    const actionItems = {
+        acknowledgment_rate: [
+            'Set up push notifications for new feedback',
+            'Review feedback daily at a set time',
+            'Acknowledge immediately, respond thoughtfully later'
+        ],
+        response_time: [
+            'Enable email notifications for feedback',
+            'Set calendar reminders for feedback review',
+            'Use mobile app for quick acknowledgments'
+        ]
+    };
+    
+    return actionItems[goalId] || [];
+}
+
+function calculatePercentile(employeeValue, teamAverage, lowerIsBetter = false) {
+    if (employeeValue === 0 && teamAverage === 0) return 50;
+    if (teamAverage === 0) return lowerIsBetter ? 0 : 100;
+    
+    const ratio = employeeValue / teamAverage;
+    
+    if (lowerIsBetter) {
+      
+        if (ratio <= 0.8) return 90;
+        if (ratio <= 0.9) return 75;
+        if (ratio <= 1.0) return 60;
+        if (ratio <= 1.1) return 40;
+        if (ratio <= 1.2) return 25;
+        return 10;
+    } else {
+      
+        if (ratio >= 1.2) return 90;
+        if (ratio >= 1.1) return 75;
+        if (ratio >= 1.0) return 60;
+        if (ratio >= 0.9) return 40;
+        if (ratio >= 0.8) return 25;
+        return 10;
+    }
+}
+
+function calculateTrendAnalysis (trends){
+     if (trends.length < 2) {
+        return {
+            direction: 'stable',
+            strength: 'weak',
+            summary: 'Insufficient data for trend analysis'
+        };
+    }
+
+    const recent = trends.slice(-3); // Last 3 months
+    const older = trends.slice(0, -3); // Earlier months
+    
+    if (recent.length === 0 || older.length === 0) {
+        return {
+            direction: 'stable',
+            strength: 'weak',
+            summary: 'Insufficient data for trend analysis'
+        };
+    }
+
+    const recentAvg = recent.reduce((sum, t) => sum + t.acknowledgmentRate, 0) / recent.length;
+    const olderAvg = older.reduce((sum, t) => sum + t.acknowledgmentRate, 0) / older.length;
+    
+    const change = recentAvg - olderAvg;
+    const changePercent = Math.abs(change);
+    
+    let direction = 'stable';
+    let strength = 'weak';
+    
+    if (change > 5) direction = 'improving';
+    else if (change < -5) direction = 'declining';
+    
+    if (changePercent > 15) strength = 'strong';
+    else if (changePercent > 8) strength = 'moderate';
+    
+    return {
+        direction,
+        strength,
+        change: Math.round(change * 10) / 10,
+        summary: `${direction === 'improving' ? 'Improving' : direction === 'declining' ? 'Declining' : 'Stable'} trend with ${strength} ${changePercent > 5 ? 'momentum' : 'movement'}`
+    };
+}
+
+function categorizeResponseTime(avgResponseTime) {
+    if (!avgResponseTime) return 'unknown';
+    if (avgResponseTime <= 1) return 'excellent';
+    if (avgResponseTime <= 3) return 'good';
+    if (avgResponseTime <= 7) return 'fair';
+    return 'needs_improvement';
+}
+
+function calculateQuickHealthScore(acknowledgmentRate, positiveRate, avgResponseTime) {
+    let score = 0;
+    
+    score += (acknowledgmentRate / 100) * 40;
+    
+    score += (positiveRate / 100) * 40;
+    
+    if (avgResponseTime !== null) {
+        const responseScore = Math.max(0, 20 - (avgResponseTime * 2));
+        score += Math.min(20, responseScore);
+    }
+    
+    return Math.round(score);
+}
+
+function handlePromiseResults (results){
+    return results.map((result , index)=>{
+        if(result.status === "fulfilled"){
+            return result.value;
+        }else {
+            console.warn(`Dashboard promise ${index} failed:`, result.reason?.message);
+            return null;
+        }
+    })
+};
+
+function getTimeRangeDescription(days) {
+    if (days === 1) return 'Today';
+    if (days === 7) return 'Last week';
+    if (days === 30) return 'Last month';
+    if (days === 90) return 'Last quarter';
+    if (days === 365) return 'Last year';
+    return `Last ${days} days`;
+}
+
+function calculateFeedbackVelocity(feedbackOverview, daysBack) {
+    if (!feedbackOverview || !feedbackOverview.totalFeedback) return 0;
+    const weeks = Math.max(1, Math.ceil(daysBack / 7));
+    return Math.round((feedbackOverview.totalFeedback / weeks) * 10) / 10;
+}
+
+function extractTopStrengths(feedbackHistory) {
+    if (!feedbackHistory?.recentFeedback) return [];
+    
+    const strengthsText = feedbackHistory.recentFeedback
+        .map(f => f.strengths)
+        .filter(Boolean)
+        .join(' ');
+    
+    const commonWords = strengthsText.toLowerCase()
+        .split(/\W+/)
+        .filter(word => word.length > 3)
+        .reduce((acc, word) => {
+            acc[word] = (acc[word] || 0) + 1;
+            return acc;
+        }, {});
+    
+    return Object.entries(commonWords)
+        .sort(([,a], [,b]) => b - a)
+        .slice(0, 5)
+        .map(([word, count]) => ({ word, count }));
+}
+
+function getGoalStatus(current, target, lowerIsBetter = false) {
+    if (!current) return 'no_data';
+    
+    const ratio = current / target;
+    
+    if (lowerIsBetter) {
+        if (ratio <= 1) return 'achieved';
+        if (ratio <= 1.5) return 'close';
+        return 'needs_work';
+    } else {
+        if (ratio >= 1) return 'achieved';
+        if (ratio >= 0.8) return 'close';
+        return 'needs_work';
+    }
+}
+
+function getHealthCategory(score) {
+    if (score >= 85) return 'excellent';
+    if (score >= 70) return 'good';
+    if (score >= 55) return 'fair';
+    return 'needs_attention';
+}
+
+function assessDataQuality(results) {
+    const [feedbackOverview] = results;
+    
+    let quality = 'good';
+    const issues = [];
+    
+    if (!feedbackOverview || feedbackOverview.totalFeedback === 0) {
+        quality = 'limited';
+        issues.push('No feedback data available');
+    } else if (feedbackOverview.totalFeedback < 3) {
+        quality = 'limited';
+        issues.push('Limited feedback sample size');
+    }
+    
+    return {
+        level: quality,
+        issues,
+        score: issues.length === 0 ? 100 : Math.max(20, 100 - (issues.length * 30))
+    };
+}
+
+function calculateEmployeeHealthScore(results) {
+    const [feedbackOverview, , performanceMetrics, , , acknowledgmentStats] = results;
+    
+    let score = 0;
+    let maxScore = 0;
+    
+    // Acknowledgment rate (30 points)
+    if (acknowledgmentStats?.overall?.acknowledgmentRate !== undefined) {
+        score += Math.min(30, (acknowledgmentStats.overall.acknowledgmentRate / 100) * 30);
+        maxScore += 30;
+    }
+    
+    // Response time (20 points)
+    if (acknowledgmentStats?.overall?.avgResponseTime !== null && acknowledgmentStats?.overall?.avgResponseTime !== undefined) {
+        const responseScore = Math.max(0, 20 - (acknowledgmentStats.overall.avgResponseTime * 2));
+        score += Math.min(20, responseScore);
+        maxScore += 20;
+    }
+    
+    // Positive feedback rate (25 points)
+    if (performanceMetrics?.currentPeriod?.positiveRate !== undefined) {
+        score += Math.min(25, (performanceMetrics.currentPeriod.positiveRate / 100) * 25);
+        maxScore += 25;
+    }
+    
+    // Engagement (25 points)
+    if (feedbackOverview?.totalFeedback !== undefined) {
+        const engagementScore = Math.min(25, feedbackOverview.totalFeedback * 2);
+        score += engagementScore;
+        maxScore += 25;
+    }
+    
+    const finalScore = maxScore > 0 ? Math.round((score / maxScore) * 100) : 0;
+    
+    return {
+        score: finalScore,
+        category: getHealthCategory(finalScore),
+        breakdown: {
+            acknowledgment: acknowledgmentStats?.overall?.acknowledgmentRate || 0,
+            responsiveness: acknowledgmentStats?.overall?.avgResponseTime || null,
+            positivity: performanceMetrics?.currentPeriod?.positiveRate || 0,
+            engagement: feedbackOverview?.totalFeedback || 0
+        }
+    };
+}
+
+async function generateGoalProgress(employeeId, startDate) {
+    try {
+        // This would integrate with a goals/OKR system if available
+        const goals = [
+            {
+                id: 'acknowledgment_rate',
+                title: 'Maintain 80%+ Acknowledgment Rate',
+                target: 80,
+                current: null, // Will be filled from feedback data
+                unit: '%',
+                category: 'engagement'
+            },
+            {
+                id: 'response_time',
+                title: 'Respond to Feedback Within 48h',
+                target: 2,
+                current: null,
+                unit: 'days',
+                category: 'responsiveness'
+            }
+        ];
+
+        // Get current performance data
+        const performanceData = await Feedback.aggregate([
+            {
+                $match: {
+                    toEmployeeId: new mongoose.Types.ObjectId(employeeId),
+                    isDeleted: false,
+                    createdAt: { $gte: startDate }
+                }
+            },
+            {
+                $group: {
+                    _id: null,
+                    totalFeedback: { $sum: 1 },
+                    acknowledgedCount: { $sum: { $cond: ['$isAcknowledged', 1, 0] } },
+                    avgResponseTime: {
+                        $avg: {
+                            $cond: [
+                                '$isAcknowledged',
+                                { $divide: [{ $subtract: ['$acknowledgedAt', '$createdAt'] }, 1000 * 60 * 60 * 24] },
+                                null
+                            ]
+                        }
+                    }
+                }
+            }
+        ]);
+
+        const data = performanceData[0];
+        if (data) {
+            goals[0].current = data.totalFeedback > 0 ? 
+                Math.round((data.acknowledgedCount / data.totalFeedback) * 100) : 0;
+            goals[1].current = data.avgResponseTime ? 
+                Math.round(data.avgResponseTime * 10) / 10 : null;
+        }
+
+        return {
+            goals: goals.map(goal => ({
+                ...goal,
+                progress: goal.current ? Math.min(100, (goal.current / goal.target) * 100) : 0,
+                status: getGoalStatus(goal.current, goal.target, goal.id === 'response_time')
+            })),
+            overallProgress: goals.reduce((sum, goal) => {
+                const progress = goal.current ? Math.min(100, (goal.current / goal.target) * 100) : 0;
+                return sum + progress;
+            }, 0) / goals.length
+        };
+        
+    } catch (error) {
+        console.warn('Failed to generate goal progress:', error.message);
+        return null;
+    }
+}
 
 
-export { getManagerTeams, generateFeedbackAnalytics, generateEmployeeMetrics, generateTeamOverview, generateRecentActivity, generatePerformanceInsights, getEmployeeTeamInfo, generateFeedbackOverview, generateFeedbackHistory, generatePerformanceMetrics, generateTeamComparison, generatePerformanceTrends, generateAcknowledgmentStats , generateManagerInsights };
+export { getManagerTeams, generateFeedbackAnalytics, generateEmployeeMetrics, generateTeamOverview, generateRecentActivity, generatePerformanceInsights, getEmployeeTeamInfo, generateFeedbackOverview, generateFeedbackHistory, generatePerformanceMetrics, generateTeamComparison, generatePerformanceTrends, generateAcknowledgmentStats , generateManagerInsights , generateRecommendations , handlePromiseResults  , getTimeRangeDescription , calculateFeedbackVelocity , extractTopStrengths , getGoalStatus , getHealthCategory , assessDataQuality , calculateQuickHealthScore  , calculateEmployeeHealthScore , generateGoalProgress};
